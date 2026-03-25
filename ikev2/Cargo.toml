@@ -1,0 +1,23 @@
+[package]
+name = "ikev2"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+bitflags = "2.9.1"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+bytes = "1.10.1"
+futures = "0.3.32"
+futures-timer = "3.0.3"
+hex-literal = "1.1.0"
+log = "0.4.28"
+openssl = { version = "0.10.75", features = ["vendored"] }
+phf = { version = "0.13.1", features = ["macros"] }
+rand = "0.10.0"
+rend = { version = "0.5.2", features = ["bytemuck-1"] }
+smallvec = { version = "1.15.1", features = ["union", "const_new"] }
+
+[dev-dependencies]
+hex = "0.4.3"
