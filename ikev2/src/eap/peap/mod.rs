@@ -1,23 +1,22 @@
 mod avp;
-mod identity;
-mod tls;
+pub(crate) mod tls;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use super::{
     EAP_CODE_REQUEST, EAP_CODE_RESPONSE, EAP_TYPE_IDENTITY, EAP_TYPE_PEAP, EapAction,
     EapConversation, EapMethod, Mschapv2Config, Mschapv2Method,
 };
 use avp::{decode_peer_request, encode_peer_response};
-use tls::{OpenSslPeapTlsBackend, PeapTlsBackend, PeapTlsStep};
+use tls::{BackendPeapTls, PeapTlsBackend, PeapTlsStep};
 
 pub const PEAP_FLAG_LENGTH_INCLUDED: u8 = 0x80;
 pub const PEAP_FLAG_MORE_FRAGMENTS: u8 = 0x40;
 pub const PEAP_FLAG_START: u8 = 0x20;
 pub const PEAP_SUPPORTED_VERSION: u8 = 0;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub enum PeapPhase {
     #[default]
     Idle,
@@ -38,7 +37,7 @@ pub struct PeapConfig {
     pub fragment_size: usize,
     pub max_message_count: usize,
     pub include_length: bool,
-    pub tls13_strongswan_compat: bool,
+    pub strongswan_compatible: bool,
 }
 
 pub struct PeapPacket {
@@ -60,7 +59,7 @@ pub struct PeapMethod {
     config: PeapConfig,
     phase: PeapPhase,
     conversation: EapConversation,
-    tls: OpenSslPeapTlsBackend,
+    tls: Box<dyn PeapTlsBackend>,
     inner: Mschapv2Method,
     inbound_tls_fragments: BytesMut,
     inbound_tls_total_len: Option<usize>,
@@ -71,8 +70,10 @@ pub struct PeapMethod {
 
 impl PeapMethod {
     pub fn new(config: PeapConfig) -> Result<Self> {
-        let tls =
-            OpenSslPeapTlsBackend::new(config.aaa_identity.clone(), config.tls13_strongswan_compat)?;
+        let tls = Box::new(BackendPeapTls::new(
+            config.aaa_identity.clone(),
+            config.strongswan_compatible,
+        )?);
         let inner = Mschapv2Method::new(Mschapv2Config {
             identity: config.identity.clone(),
             password: config.password.clone(),
@@ -106,58 +107,32 @@ impl PeapMethod {
         self.processed_message_count = 0;
     }
 
-    fn parse_peap(packet: &[u8]) -> Result<PeapPacket> {
-        ensure!(packet.len() >= 6, "peap packet too short");
-        let code = packet[0];
-        let identifier = packet[1];
-        let length = u16::from_be_bytes([packet[2], packet[3]]) as usize;
-        ensure!(length == packet.len(), "peap eap length mismatch");
-        ensure!(packet[4] == EAP_TYPE_PEAP, "unexpected outer eap type");
-        let flags = packet[5];
-        let version = flags & 0x07;
-        ensure!(version == PEAP_SUPPORTED_VERSION, "unsupported peap version");
-
-        let mut offset = 6;
-        let tls_message_length = if flags & PEAP_FLAG_LENGTH_INCLUDED != 0 {
-            ensure!(packet.len() >= 10, "peap packet missing tls length");
-            let len = u32::from_be_bytes([
-                packet[offset],
-                packet[offset + 1],
-                packet[offset + 2],
-                packet[offset + 3],
-            ]);
-            offset += 4;
-            Some(len)
-        } else {
-            None
-        };
-        ensure!(offset <= packet.len(), "invalid peap payload offset");
-        Ok(PeapPacket {
-            code,
-            identifier,
-            flags,
-            tls_message_length,
-            tls_data: Bytes::copy_from_slice(&packet[offset..]),
-        })
-    }
-
     fn parse_inbound_packet(packet: &[u8]) -> Result<InboundEapPacket> {
-        ensure!(packet.len() >= 4, "eap packet too short");
-        let identifier = packet[1];
-        let length = u16::from_be_bytes([packet[2], packet[3]]) as usize;
-        ensure!(length == packet.len(), "eap length mismatch");
-        match packet[0] {
-            EAP_CODE_REQUEST => {}
-            super::EAP_CODE_SUCCESS => return Ok(InboundEapPacket::Success { identifier }),
-            super::EAP_CODE_FAILURE => return Ok(InboundEapPacket::Failure { identifier }),
-            other => bail!("unsupported outer eap code {other} for peap"),
-        }
-        ensure!(length >= 5, "eap request missing type");
-        match packet[4] {
-            EAP_TYPE_IDENTITY => Ok(InboundEapPacket::Identity { identifier }),
-            EAP_TYPE_PEAP => Ok(InboundEapPacket::Peap(Self::parse_peap(packet)?)),
-            other => bail!("unsupported outer eap type {other} for peap"),
-        }
+        use super::InboundEapPacket as GeneralEapPacket;
+        Ok(match super::parse_eap(packet)? {
+            GeneralEapPacket::Failure { identifier } => InboundEapPacket::Failure { identifier },
+            GeneralEapPacket::Identity { identifier } => InboundEapPacket::Identity { identifier },
+            GeneralEapPacket::Success { identifier } => InboundEapPacket::Success { identifier },
+            GeneralEapPacket::Request { identifier, eap_type, mut payload } => {
+                ensure!(eap_type == EAP_TYPE_PEAP);
+                let flags = payload.try_get_u8().context("peap parsing")?;
+                let version = flags & 0x07;
+                ensure!(version == PEAP_SUPPORTED_VERSION, "unsupported peap version");
+                let tls_message_length = if flags & PEAP_FLAG_LENGTH_INCLUDED != 0 {
+                    let len = payload.try_get_u32().context("peap parsing")?;
+                    Some(len)
+                } else {
+                    None
+                };
+                InboundEapPacket::Peap(PeapPacket {
+                    code: EAP_CODE_REQUEST,
+                    identifier,
+                    flags,
+                    tls_message_length,
+                    tls_data: Bytes::copy_from_slice(payload),
+                })
+            }
+        })
     }
 
     fn encode_identity_response(&self, identifier: u8) -> Bytes {
@@ -210,9 +185,10 @@ impl PeapMethod {
     ) -> Result<Bytes> {
         let max_fragment_len = self.config.fragment_size;
         if payload.len() <= max_fragment_len {
-            let total_length = self.config.include_length.then_some(
-                u32::try_from(payload.len()).context("peap payload too large")?,
-            );
+            let total_length = self
+                .config
+                .include_length
+                .then_some(u32::try_from(payload.len()).context("peap payload too large")?);
             return self.encode_peap_response(
                 identifier,
                 initial_flags,
@@ -344,7 +320,7 @@ impl PeapMethod {
     fn handle_packet_inner(&mut self, packet: Bytes, round_index: u16) -> Result<EapAction> {
         self.conversation.round_index = round_index;
         self.conversation.last_request = Some(packet.clone());
-        let inbound = Self::parse_inbound_packet(packet.as_ref())?;
+        let inbound = Self::parse_inbound_packet(&packet)?;
 
         if let InboundEapPacket::Peap(peap) = &inbound {
             self.processed_message_count = self.processed_message_count.saturating_add(1);

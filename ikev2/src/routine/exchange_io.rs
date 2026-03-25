@@ -31,9 +31,8 @@ impl Ikev2Routine {
     ) -> Result<(u32, Vec<Payload>)> {
         let message_id = self.begin_request_exchange();
         self.send_request_packets(udp_conn, message_id, packets).await?;
-        let payloads = self
-            .recv_response_protected(udp_conn, step, exchange_type, message_id)
-            .await?;
+        let payloads =
+            self.recv_response_protected(udp_conn, step, exchange_type, message_id).await?;
         self.sa.expected_response_message_id = None;
         Ok((message_id, payloads))
     }
@@ -64,13 +63,8 @@ impl Ikev2Routine {
                     }
                 }
                 futures::future::Either::Right((_, _)) => {
-                    self.retransmit_current_request(
-                        udp_conn,
-                        step,
-                        &mut timeout,
-                        &mut retransmits,
-                    )
-                    .await?;
+                    self.retransmit_current_request(udp_conn, step, &mut timeout, &mut retransmits)
+                        .await?;
                 }
             }
         }
@@ -85,7 +79,9 @@ impl Ikev2Routine {
     ) -> Result<Vec<Payload>> {
         loop {
             let packet = self.recv_packet(udp_conn, step).await?;
-            if let Some(payloads) = self.parse_response_protected(packet, exchange_type, message_id)? {
+            if let Some(payloads) =
+                self.parse_response_protected(packet, exchange_type, message_id)?
+            {
                 return Ok(payloads);
             }
         }

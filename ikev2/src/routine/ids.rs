@@ -1,5 +1,5 @@
 use super::Ikev2Routine;
-use crate::consts::{ID_TYPE_DER_ASN1_DN, ID_TYPE_FQDN, ID_TYPE_RFC822_ADDR};
+use crate::consts::{ID_TYPE_FQDN, ID_TYPE_RFC822_ADDR};
 
 pub(super) fn rightid_matches(expected: &str, received_type: u8, received_id: &[u8]) -> bool {
     fn wildcard_match(pattern: &str, value: &str, case_insensitive: bool) -> bool {
@@ -43,12 +43,6 @@ pub(super) fn rightid_matches(expected: &str, received_type: u8, received_id: &[
     let (expected_type, expected_value) = Ikev2Routine::configured_id_type_and_value(expected);
     if expected_type != received_type {
         return false;
-    }
-    if expected_type == ID_TYPE_DER_ASN1_DN {
-        let Ok(expected_id) = Ikev2Routine::encoded_id_value(expected_type, expected_value) else {
-            return false;
-        };
-        return expected_id.as_ref() == received_id;
     }
     let case_insensitive = matches!(expected_type, ID_TYPE_FQDN | ID_TYPE_RFC822_ADDR);
     if expected_value.contains('*') || expected_value.contains('?') {

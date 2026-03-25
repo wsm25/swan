@@ -1,9 +1,9 @@
 #[macro_use]
 mod macros;
 
+pub mod cipher;
 pub mod config;
 pub mod consts;
-pub mod cipher;
 pub mod dataplane;
 pub mod debug_fmt;
 pub mod eap;
@@ -11,8 +11,8 @@ pub mod payload;
 pub mod routine;
 pub mod state;
 
-pub use config::{Ikev2Config, Ikev2ConfigBuilder, PeerAddress};
 pub use crate::AssignedConfig as Ikev2AssignedConfig;
+pub use config::{Ikev2Config, Ikev2ConfigBuilder, PeerAddress};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bytes::Bytes;
@@ -40,6 +40,31 @@ pub struct UdpPacket {
     pub src: SocketAddr,
     pub dst: SocketAddr,
     pub payload: Bytes,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Ikev2Stage {
+    IkeInit,
+    IkeAuth,
+    Eap,
+    ChildSa,
+    Running,
+}
+
+#[derive(Clone)]
+pub struct Ikev2NegotiatedAlgorithm {
+    pub protocol: &'static str,
+    pub encryption: Box<str>,
+    pub integrity: Option<Box<str>>,
+    pub prf: Option<Box<str>>,
+    pub dh: Option<Box<str>>,
+}
+
+#[derive(Clone)]
+pub struct Ikev2EapProcess {
+    pub method: Box<str>,
+    pub state: &'static str,
+    pub round: Option<u16>,
 }
 
 pub struct ChildSaKeyMaterial {
@@ -97,6 +122,9 @@ pub trait UdpConn:
 pub enum Ikev2Event {
     Starting,
     HandshakeStarted,
+    StageChanged(Ikev2Stage),
+    NegotiatedAlgorithm(Ikev2NegotiatedAlgorithm),
+    EapProcess(Ikev2EapProcess),
     HandshakeCompleted,
     ConfigAssigned(Ikev2AssignedConfig),
     Started,
@@ -221,7 +249,7 @@ impl Ikev2Interface {
             installer.install(&child_sa_install)?;
         }
         let child_sa_keys = routine.derive_child_sa_key_material()?;
-        let child_sa_selection = routine.first_esp_selection()?.clone();
+        let child_sa_selection = routine.selected_esp_proposal()?.clone();
         let udp_conn = self.udp_conn.take().context("udp connection missing")?;
         self.running = Some(dataplane::RunningDataPlane::spawn(
             udp_conn,
@@ -234,10 +262,11 @@ impl Ikev2Interface {
         self.assigned_config = summary.assigned_config.take();
         self.state = InterfaceState::Running;
         self.push_event(Ikev2Event::HandshakeCompleted);
-        self.push_event(Ikev2Event::Started);
         if let Some(config) = self.assigned_config.take() {
             self.push_event(Ikev2Event::ConfigAssigned(config));
         }
+        self.push_event(Ikev2Event::StageChanged(Ikev2Stage::Running));
+        self.push_event(Ikev2Event::Started);
         Ok(())
     }
 
@@ -290,7 +319,7 @@ impl Ikev2Interface {
         self.push_event(Ikev2Event::Starting);
         self.push_event(Ikev2Event::HandshakeStarted);
 
-        let mut routine = Ikev2Routine::new(self.config.clone());
+        let mut routine = Ikev2Routine::new_with_events(self.config.clone(), self.events.clone());
         let result = {
             let udp_conn = self.udp_conn.as_mut().expect("checked above");
             routine.run(&mut **udp_conn).await

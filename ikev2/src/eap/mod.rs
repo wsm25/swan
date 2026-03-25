@@ -1,11 +1,13 @@
 pub mod mschapv2;
+pub mod payload;
 pub mod peap;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
 
 pub use mschapv2::{Mschapv2Config, Mschapv2Method, Mschapv2Phase};
+pub use payload::{InboundEapPacket, build_eap_response, build_identity_response, parse_eap};
 pub use peap::{PeapConfig, PeapMethod, PeapPhase};
 
 const_variant! {
@@ -32,7 +34,7 @@ pub struct EapMethodConfig {
     pub peap_fragment_size: usize,
     pub peap_max_message_count: usize,
     pub peap_include_length: bool,
-    pub peap_tls13_strongswan_compat: bool,
+    pub strongswan_compatible: bool,
 }
 
 pub struct EapRunResult {
@@ -112,7 +114,7 @@ pub fn build_method(config: EapMethodConfig) -> Result<Box<dyn EapMethod>> {
             fragment_size: config.peap_fragment_size,
             max_message_count: config.peap_max_message_count,
             include_length: config.peap_include_length,
-            tls13_strongswan_compat: config.peap_tls13_strongswan_compat,
+            strongswan_compatible: config.strongswan_compatible,
         })?)),
         "mschapv2" => Ok(Box::new(Mschapv2Method::new(Mschapv2Config {
             identity: config.peer_identity,

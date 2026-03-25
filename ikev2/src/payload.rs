@@ -5,7 +5,6 @@ use anyhow::{Context, Result, anyhow, ensure};
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable, bytes_of, pod_read_unaligned};
 use bytes::{Buf, Bytes, BytesMut};
-use openssl::rand::rand_bytes;
 use rend::{u16_be, u32_be};
 use std::{
     mem::{offset_of, take},
@@ -13,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{Ikev2EapHandshake, InboundFragmentReassembly};
+use crate::{Ikev2EapHandshake, InboundFragmentReassembly, cipher::rand_bytes};
 
 pub const IKEV2_VERSION: u8 = 0x20;
 pub const IKE_HEADER_LEN: usize = 28;
@@ -306,24 +305,30 @@ impl PayloadParser {
             (&keys.sk_ei, &keys.sk_ai)
         };
 
-        // verify ICV over the exact inbound wire image through Pad Length
-        let icv_len = integ.output_len;
-        let iv_len = enc.iv_len;
-        ensure!(buf.len() >= iv_len + icv_len);
-        let crypt_len = buf.len() - iv_len;
-        let body_len = buf.len();
-        ensure!(crypt_len >= icv_len && (crypt_len - icv_len).is_multiple_of(enc.block_len));
         // SAFETY: `buf` is expected to share the same allocation as the inbound packet.
         let body_offset = unsafe { buf.as_ptr().offset_from(packet.as_ptr()) } as usize;
-        let packet_without_icv_len = body_offset + body_len - icv_len;
-        ensure!(packet_without_icv_len <= packet.len());
-        let mac = (integ.sign)(sk_a.as_ref(), &packet[..packet_without_icv_len])?;
-        ensure!(mac.len() >= icv_len && mac[..icv_len] == buf[body_len - icv_len..]);
+        ensure!(body_offset <= packet.len(), "protected payload body offset out of bounds");
+        let iv_len = enc.iv_len;
+        ensure!(buf.len() >= iv_len, "protected payload shorter than IV");
+        let (aad, body) = packet.split_at(body_offset);
 
-        // decrypt
-        let (iv, rest) = buf.split_at(iv_len);
-        let ciphertext = &rest[..rest.len() - icv_len];
-        let plaintext = (enc.decrypt)(sk_e.as_ref(), iv, ciphertext)?;
+        let plaintext = if enc.is_aead {
+            ensure!(body.len() >= iv_len + enc.icv_len, "truncated AEAD protected payload");
+            let (iv, ciphertext) = body.split_at(iv_len);
+            enc.decrypt_vec(sk_e.as_ref(), iv, aad, ciphertext)?
+        } else {
+            let icv_len = integ.output_len;
+            ensure!(body.len() >= iv_len + icv_len, "truncated protected payload");
+            let crypt_len = body.len() - iv_len;
+            ensure!(crypt_len >= icv_len && (crypt_len - icv_len).is_multiple_of(enc.block_len));
+            let packet_without_icv_len = body_offset + body.len() - icv_len;
+            ensure!(packet_without_icv_len <= packet.len());
+            let mac = integ.sign_vec(sk_a.as_ref(), &packet[..packet_without_icv_len])?;
+            ensure!(mac.len() >= icv_len && mac[..icv_len] == body[body.len() - icv_len..]);
+            let (iv, rest) = body.split_at(iv_len);
+            let ciphertext = &rest[..rest.len() - icv_len];
+            enc.decrypt_vec(sk_e.as_ref(), iv, &[], ciphertext)?
+        };
         ensure!(!plaintext.is_empty(), "empty SKF fragment plaintext");
         let pad_len = plaintext[plaintext.len() - 1] as usize;
         ensure!(plaintext.len() > pad_len, "invalid SKF padding length");
@@ -355,7 +360,7 @@ impl IkeMessageBuilder {
     /// The closure writes only the payload body. This function fills the generic
     /// payload header, updates outer payload chaining, and appends the result to
     /// `self.buffer`.
-    pub fn push_payload(
+    pub fn try_push_payload(
         &mut self,
         payload_type: u8,
         is_critical: bool,
@@ -368,9 +373,8 @@ impl IkeMessageBuilder {
             return Err(e);
         }
         let payload_len = self.buffer.len() - start;
-        let length = payload_len
-            .try_into()
-            .with_context(|| format!("payload too long ({payload_len})"))?;
+        let length =
+            payload_len.try_into().with_context(|| format!("payload too long ({payload_len})"))?;
         if self.last_offset == usize::MAX {
             self.first_payload = payload_type
         } else {
@@ -380,6 +384,19 @@ impl IkeMessageBuilder {
         self.buffer[start..start + PAYLOAD_HEADER_LEN]
             .copy_from_slice(bytes_of(&PayloadHeader::new(PAYLOAD_TYPE_NONE, is_critical, length)));
         Ok(self)
+    }
+
+    pub fn push_payload(
+        &mut self,
+        payload_type: u8,
+        is_critical: bool,
+        f: impl FnOnce(&mut BytesMut),
+    ) -> &mut Self {
+        self.try_push_payload(payload_type, is_critical, |buf| {
+            f(buf);
+            Ok(())
+        })
+        .unwrap()
     }
 
     /// Appends a terminal `SK` or `SKF` payload into the final IKE packet buffer.
@@ -437,46 +454,63 @@ impl IkeMessageBuilder {
         );
         crate::debug_fmt::log_ike_bytes("outbound ike plaintext+padded", plaintext.as_ref());
 
-        // encrypt
-        let mut iv = vec![0_u8; enc.iv_len];
-        rand_bytes(&mut iv).context("generate IKE IV")?;
-        crate::debug_fmt::log_ike_bytes("outbound ike iv", iv.as_ref());
-        let ciphertext = (enc.encrypt)(sk_e, &iv, &plaintext).context("encrypt payload")?;
-        crate::debug_fmt::log_ike_bytes("outbound ike ciphertext", ciphertext.as_ref());
+        let fragment_header_len = if skf_fragment.is_some() { SKF_HEADER_LEN } else { 0 };
+        let ciphertext_len = plaintext.len() + enc.icv_len;
+        let outer_icv_len = if enc.is_aead { 0 } else { integ.output_len };
+        let payload_len =
+            PAYLOAD_HEADER_LEN + fragment_header_len + enc.iv_len + ciphertext_len + outer_icv_len;
+        let payload_len =
+            u16::try_from(payload_len).with_context(|| format!("payload too long ({payload_len})"))?;
+        if self.last_offset == usize::MAX {
+            self.first_payload = payload_type;
+        } else {
+            self.buffer[self.last_offset] = payload_type;
+        }
 
-        let icv_len = integ.output_len;
-        self.push_payload(payload_type, is_critical, |buf| {
-            if let Some((fragment_number, total_fragments)) = skf_fragment {
-                ensure!(
-                    fragment_number != 0
-                        && total_fragments != 0
-                        && fragment_number <= total_fragments
-                );
-                let skf = SkfHeader {
-                    fragment_number: fragment_number.into(),
-                    total_fragments: total_fragments.into(),
-                };
-                buf.extend_from_slice(bytes_of(&skf));
-            }
-            buf.extend_from_slice(&iv);
-            buf.extend_from_slice(&ciphertext);
-            buf.resize(buf.len() + icv_len, 0);
-            Ok(())
-        })?;
-        self.buffer[self.last_offset] = next_payload;
-
-        // The ICV must cover the final outer IKE header bytes.
+        let start = self.buffer.len();
+        self.last_offset = start + offset_of!(PayloadHeader, next_payload);
+        self.buffer.extend_from_slice(bytes_of(&PayloadHeader::new(
+            next_payload,
+            is_critical,
+            payload_len,
+        )));
+        if let Some((fragment_number, total_fragments)) = skf_fragment {
+            ensure!(
+                fragment_number != 0 && total_fragments != 0 && fragment_number <= total_fragments
+            );
+            let skf = SkfHeader {
+                fragment_number: fragment_number.into(),
+                total_fragments: total_fragments.into(),
+            };
+            self.buffer.extend_from_slice(bytes_of(&skf));
+        }
         self.buffer[16] = self.first_payload;
-        let packet_len = self.buffer.len() as u32;
+        let packet_len = (self.buffer.len() + enc.iv_len + ciphertext_len + outer_icv_len) as u32;
         self.buffer[24..28].copy_from_slice(&packet_len.to_be_bytes());
 
-        // icv
-        let icv_start = self.buffer.len() - icv_len;
-        let packet_without_icv = &self.buffer[..icv_start];
-        let mac = (integ.sign)(sk_a, packet_without_icv).context("compute ICV")?;
-        ensure!(mac.len() >= icv_len, "integrity output too short");
-        self.buffer[icv_start..].copy_from_slice(&mac[..icv_len]);
-        crate::debug_fmt::log_ike_bytes("outbound ike icv", &self.buffer[icv_start..]);
+        let mut iv = vec![0_u8; enc.iv_len];
+        rand_bytes(&mut iv);
+        crate::debug_fmt::log_ike_bytes("outbound ike iv", iv.as_ref());
+        let ciphertext = if enc.is_aead {
+            enc.encrypt_vec(sk_e, &iv, self.buffer.as_ref(), &plaintext).context("encrypt payload")?
+        } else {
+            enc.encrypt_vec(sk_e, &iv, &[], &plaintext).context("encrypt payload")?
+        };
+        crate::debug_fmt::log_ike_bytes("outbound ike ciphertext", ciphertext.as_ref());
+
+        self.buffer.extend_from_slice(&iv);
+        self.buffer.extend_from_slice(&ciphertext);
+        if enc.is_aead {
+            let icv_start = self.buffer.len() - enc.icv_len;
+            crate::debug_fmt::log_ike_bytes("outbound ike icv", &self.buffer[icv_start..]);
+        } else {
+            let icv_len = integ.output_len;
+            self.buffer.resize(self.buffer.len() + icv_len, 0);
+            let icv_start = self.buffer.len() - icv_len;
+            let (packet_without_icv, icv) = self.buffer.split_at_mut(icv_start);
+            (integ.sign)(sk_a, packet_without_icv, icv).context("compute ICV")?;
+            crate::debug_fmt::log_ike_bytes("outbound ike icv", &self.buffer[icv_start..]);
+        }
         crate::debug_fmt::log_ike_bytes("outbound ike packet", self.buffer.as_ref());
         Ok(self)
     }

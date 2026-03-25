@@ -1,8 +1,6 @@
-use crate::IKEV2_NAT_T_PORT;
 use anyhow::{Result, anyhow, bail, ensure};
 use phf::phf_map;
-use smallvec::SmallVec;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 use crate::cipher::*;
 
@@ -25,7 +23,10 @@ pub struct Ikev2Config {
     pub peap_fragment_size: usize,
     pub peap_max_message_count: usize,
     pub peap_include_length: bool,
-    pub peap_tls13_strongswan_compat: bool,
+    // strongSwan compatibility mode currently changes two behaviors:
+    // TLS 1.3 PEAP MSK export uses the strongSwan-compatible exporter label,
+    // and AEAD ESP CHILD_SA proposals omit explicit NO_EXT_SEQ.
+    pub strongswan_compatible: bool,
     // Expected responder IKE identity (strongSwan rightid / swanctl remote.id).
     // None means wildcard matching ("%any"-like behavior).
     pub rightid: Option<String>,
@@ -44,7 +45,7 @@ pub struct Ikev2ConfigBuilder {
     peap_fragment_size: Option<usize>,
     peap_max_message_count: Option<usize>,
     peap_include_length: Option<bool>,
-    peap_tls13_strongswan_compat: Option<bool>,
+    strongswan_compatible: Option<bool>,
     rightid: Option<String>,
 }
 
@@ -58,7 +59,7 @@ impl Ikev2ConfigBuilder {
     const DEFAULT_PEAP_FRAGMENT_SIZE: usize = 1024;
     const DEFAULT_PEAP_MAX_MESSAGE_COUNT: usize = 32;
     const DEFAULT_PEAP_INCLUDE_LENGTH: bool = false;
-    const DEFAULT_PEAP_TLS13_STRONGSWAN_COMPAT: bool = false;
+    const DEFAULT_STRONGSWAN_COMPATIBLE: bool = false;
     const DEFAULT_EAP_METHOD: &'static str = "peap";
 
     pub fn ike_suite(mut self, suite: impl IntoIterator<Item = CipherSuite>) -> Self {
@@ -83,8 +84,8 @@ impl Ikev2ConfigBuilder {
         Ok(self)
     }
 
-    pub fn peer_ip(mut self, ip: IpAddr) -> Self {
-        self.peer = Some(PeerAddress::Ip(SocketAddr::new(ip, IKEV2_NAT_T_PORT)));
+    pub fn peer(mut self, addr: SocketAddr) -> Self {
+        self.peer = Some(PeerAddress::Ip(addr));
         self
     }
 
@@ -148,8 +149,8 @@ impl Ikev2ConfigBuilder {
         self
     }
 
-    pub fn peap_tls13_strongswan_compat(mut self, value: bool) -> Self {
-        self.peap_tls13_strongswan_compat = Some(value);
+    pub fn strongswan_compatible(mut self, value: bool) -> Self {
+        self.strongswan_compatible = Some(value);
         self
     }
 
@@ -157,12 +158,6 @@ impl Ikev2ConfigBuilder {
         let value = value.into();
         let value = value.trim();
         ensure!(!value.is_empty(), "rightid must not be empty");
-        if let Some(dn) = value.strip_prefix('=') {
-            ensure!(!dn.is_empty(), "rightid DN value must not be empty");
-        }
-        if let Some(dn) = value.strip_prefix("dn:") {
-            ensure!(!dn.is_empty(), "rightid DN value must not be empty");
-        }
         if let Some(key_id) = value.strip_prefix("#") {
             ensure!(!key_id.is_empty(), "rightid KEY_ID value must not be empty");
         }
@@ -201,9 +196,9 @@ impl Ikev2ConfigBuilder {
             peap_include_length: self
                 .peap_include_length
                 .unwrap_or(Self::DEFAULT_PEAP_INCLUDE_LENGTH),
-            peap_tls13_strongswan_compat: self
-                .peap_tls13_strongswan_compat
-                .unwrap_or(Self::DEFAULT_PEAP_TLS13_STRONGSWAN_COMPAT),
+            strongswan_compatible: self
+                .strongswan_compatible
+                .unwrap_or(Self::DEFAULT_STRONGSWAN_COMPATIBLE),
             rightid: self.rightid,
         })
     }
@@ -213,10 +208,10 @@ impl Ikev2ConfigBuilder {
 
 #[derive(Clone, Debug)]
 pub struct CipherSuite {
-    pub encryption: SmallVec<[EncryptionAlgID; 2]>,
-    pub integrity: SmallVec<[IntegrityAlgID; 2]>,
-    pub prf: SmallVec<[PrfAlgID; 2]>,
-    pub dh: SmallVec<[DhAlgID; 2]>,
+    pub encryption: Vec<EncryptionAlgID>,
+    pub integrity: Vec<IntegrityAlgID>,
+    pub prf: Vec<PrfAlgID>,
+    pub dh: Vec<DhAlgID>,
 }
 
 #[derive(Clone)]
@@ -229,12 +224,12 @@ pub struct CipherSuiteSelection {
 
 impl CipherSuite {
     pub fn parse_strongswan(value: &str) -> Result<Self> {
-        let mut encryption = SmallVec::<[EncryptionAlgID; 2]>::new();
-        let mut integrity = SmallVec::<[IntegrityAlgID; 2]>::new();
-        let mut prf = SmallVec::<[PrfAlgID; 2]>::new();
-        let mut dh = SmallVec::<[DhAlgID; 2]>::new();
+        let mut encryption = Vec::new();
+        let mut integrity = Vec::new();
+        let mut prf = Vec::new();
+        let mut dh = Vec::new();
 
-        fn push_unique<T: Copy + Eq, const N: usize>(values: &mut SmallVec<[T; N]>, value: T) {
+        fn push_unique<T: Copy + Eq>(values: &mut Vec<T>, value: T) {
             if !values.contains(&value) {
                 values.push(value);
             }
@@ -260,8 +255,20 @@ impl CipherSuite {
         }
 
         ensure!(!encryption.is_empty(), "missing encryption algorithm: {value}");
-        ensure!(!integrity.is_empty(), "missing integrity algorithm: {value}");
         ensure!(!dh.is_empty(), "missing DH group: {value}");
+
+        let has_aead = encryption
+            .iter()
+            .any(|alg| ENCRYPTION_ALGS.get(alg).is_some_and(|alg| alg.is_aead));
+        let has_non_aead = encryption
+            .iter()
+            .any(|alg| ENCRYPTION_ALGS.get(alg).is_some_and(|alg| !alg.is_aead));
+        ensure!(!(has_aead && has_non_aead), "mixed AEAD and non-AEAD suites are not supported");
+        if has_aead {
+            ensure!(integrity.is_empty(), "AEAD proposal must not include integrity algorithm: {value}");
+        } else {
+            ensure!(!integrity.is_empty(), "missing integrity algorithm: {value}");
+        }
 
         if prf.is_empty() {
             for v in &integrity {
@@ -282,30 +289,65 @@ impl CipherSuite {
     }
 
     pub fn select(&self, remote: &CipherSuite) -> Result<CipherSuiteSelection> {
-        macro_rules! select_one {
-            ($algs:ident, $local:expr, $remote:expr) => {{
-                let selected =
-                    $local.iter().find(|candidate| $remote.contains(*candidate)).ok_or_else(
-                        || anyhow!("no compatible {} algorithm found", stringify!($algs)),
-                    )?;
-                $algs.get(selected).ok_or_else(|| {
-                    anyhow!("({}) local selection {:?} not supported", stringify!($algs), selected)
-                })?
-            }};
-        }
-        Ok(CipherSuiteSelection {
-            encryption: select_one!(ENCRYPTION_ALGS, &self.encryption, &remote.encryption),
-            integrity: select_one!(INTEGRITY_ALGS, &self.integrity, &remote.integrity),
-            prf: select_one!(PRF_ALGS, &self.prf, &remote.prf),
-            dh: select_one!(DH_ALGS, &self.dh, &remote.dh),
-        })
+        let encryption = self
+            .encryption
+            .iter()
+            .find(|candidate| remote.encryption.contains(*candidate))
+            .ok_or_else(|| anyhow!("no compatible ENCRYPTION_ALGS algorithm found"))?;
+        let encryption = ENCRYPTION_ALGS
+            .get(encryption)
+            .ok_or_else(|| anyhow!("(ENCRYPTION_ALGS) local selection {:?} not supported", encryption))?;
+        let integrity = if encryption.is_aead {
+            ensure!(
+                self.integrity.is_empty() && remote.integrity.is_empty(),
+                "AEAD proposals must not negotiate integrity transforms"
+            );
+            &AUTH_NONE_ALG
+        } else {
+            let integrity = self
+                .integrity
+                .iter()
+                .find(|candidate| remote.integrity.contains(*candidate))
+                .ok_or_else(|| anyhow!("no compatible INTEGRITY_ALGS algorithm found"))?;
+            INTEGRITY_ALGS.get(integrity).ok_or_else(|| {
+                anyhow!("(INTEGRITY_ALGS) local selection {:?} not supported", integrity)
+            })?
+        };
+        let prf = self
+            .prf
+            .iter()
+            .find(|candidate| remote.prf.contains(*candidate))
+            .ok_or_else(|| anyhow!("no compatible PRF_ALGS algorithm found"))?;
+        let prf = PRF_ALGS
+            .get(prf)
+            .ok_or_else(|| anyhow!("(PRF_ALGS) local selection {:?} not supported", prf))?;
+        let dh = self
+            .dh
+            .iter()
+            .find(|candidate| remote.dh.contains(*candidate))
+            .ok_or_else(|| anyhow!("no compatible DH_ALGS algorithm found"))?;
+        let dh =
+            DH_ALGS.get(dh).ok_or_else(|| anyhow!("(DH_ALGS) local selection {:?} not supported", dh))?;
+        Ok(CipherSuiteSelection { encryption, integrity, prf, dh })
     }
 }
 
 static ENCRYPTION_TABLE: phf::Map<&'static str, EncryptionAlgID> = phf_map! {
-    "aes" => (ENCR_AES_CBC, 16),
-    "aes128" => (ENCR_AES_CBC, 16),
-    "aes256" => (ENCR_AES_CBC, 32),
+    "aes" => ENCR_AES128_CBC,
+    "aes128" => ENCR_AES128_CBC,
+    "aes256" => ENCR_AES256_CBC,
+    "aes128ccm8" => ENCR_AES128_CCM_8,
+    "aes256ccm8" => ENCR_AES256_CCM_8,
+    "aes128ccm12" => ENCR_AES128_CCM_12,
+    "aes256ccm12" => ENCR_AES256_CCM_12,
+    "aes128ccm16" => ENCR_AES128_CCM_16,
+    "aes256ccm16" => ENCR_AES256_CCM_16,
+    "aes128gcm8" => ENCR_AES128_GCM_8,
+    "aes256gcm8" => ENCR_AES256_GCM_8,
+    "aes128gcm12" => ENCR_AES128_GCM_12,
+    "aes256gcm12" => ENCR_AES256_GCM_12,
+    "aes128gcm16" => ENCR_AES128_GCM_16,
+    "aes256gcm16" => ENCR_AES256_GCM_16,
 };
 
 static INTEGRITY_TABLE: phf::Map<&'static str, IntegrityAlgID> = phf_map! {
@@ -321,13 +363,13 @@ static PRF_TABLE: phf::Map<&'static str, PrfAlgID> = phf_map! {
     "prfsha1" => PRF_HMAC_SHA1,
     "prfsha256" => PRF_HMAC_SHA2_256,
     "prfsha2_256" => PRF_HMAC_SHA2_256,
-    "prfsha512" => PRF_HMAC_SHA2_256,
+    "prfsha512" => PRF_HMAC_SHA2_512,
     "prfsha2_512" => PRF_HMAC_SHA2_512,
 };
 
 static DH_ALG_TABLE: phf::Map<&'static str, DhAlgID> = phf_map! {
-    "modp1024" => DH_MODP_1024,
     "curve25519" => DH_CURVE_25519,
+    "x25519" => DH_CURVE_25519,
 };
 
 fn prf_alg_from_integrity_alg(value: IntegrityAlgID) -> PrfAlgID {

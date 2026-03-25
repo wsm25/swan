@@ -14,7 +14,6 @@ const_variant! {
     (ID_TYPE_FQDN, 2u8, ("FQDN", "Fully Qualified Domain Name")),
     (ID_TYPE_RFC822_ADDR, 3u8, ("RFC822_ADDR", "RFC 822 Address")),
     (ID_TYPE_IPV6_ADDR, 5u8, ("IPV6_ADDR", "IPv6 Address")),
-    (ID_TYPE_DER_ASN1_DN, 9u8, ("DER_ASN1_DN", "DER ASN.1 Distinguished Name")),
     (ID_TYPE_KEY_ID, 11u8, ("KEY_ID", "Key Identifier")),
 }
 

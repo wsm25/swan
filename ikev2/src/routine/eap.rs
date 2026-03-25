@@ -41,6 +41,7 @@ impl EapPeer for RoutineEapPeer<'_> {
             .await?;
         let request =
             self.routine.process_ike_auth_response_payloads(payloads, self.first_response)?;
+        self.routine.emit_eap_process("request", Some(expected as u16));
         self.first_response = false;
         Ok(request)
     }
@@ -54,6 +55,7 @@ impl EapPeer for RoutineEapPeer<'_> {
         )?;
         self.routine.begin_request_exchange();
         self.routine.send_request_packets(self.udp_conn, message_id, packets).await?;
+        self.routine.emit_eap_process("response", Some(message_id as u16));
         Ok(())
     }
 
@@ -66,11 +68,17 @@ impl Ikev2Routine {
     pub(super) async fn run_eap(&mut self, udp_conn: &mut dyn UdpConn) -> Result<()> {
         self.sa.state = IkeSaState::IkeAuthEapInProgress;
         let mut eap_method = self.eap_method.clone();
+        self.emit_event(crate::Ikev2Event::EapProcess(crate::Ikev2EapProcess {
+            method: eap_method.name().into(),
+            state: "started",
+            round: None,
+        }));
         let mut peer = RoutineEapPeer { routine: self, udp_conn, first_response: true };
         let result = eap_method.run(&mut peer).await;
         peer.routine.eap_method = eap_method;
         let EapRunResult { exported_msk } = result?;
         peer.routine.sa.auth.local_eap_msk = Some(exported_msk);
+        peer.routine.emit_eap_process("completed", None);
         Ok(())
     }
 

@@ -7,8 +7,8 @@ use crate::{
     ChildSaInstall, ChildSaKeyMaterial,
     config::CipherSuiteSelection,
     consts::{
-        CP_ATTR_NAMES, EXCHANGE_TYPE_NAMES, ID_TYPE_NAMES, NOTIFY_TYPE_NAMES,
-        TRANSFORM_TYPE_LAST, TRANSFORM_TYPE_MORE, TRANSFORM_TYPE_NAMES,
+        CP_ATTR_NAMES, EXCHANGE_TYPE_NAMES, ID_TYPE_NAMES, NOTIFY_TYPE_NAMES, TRANSFORM_TYPE_LAST,
+        TRANSFORM_TYPE_MORE, TRANSFORM_TYPE_NAMES,
     },
     eap::{
         EAP_CODE_NAMES, EAP_TYPE_NAMES, EAP_TYPE_PEAP,
@@ -152,18 +152,20 @@ fn env_enabled(key: &str) -> bool {
 impl Display for FmtIkePacket<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match PayloadParser::split_header(self.0.clone()) {
-            Ok((header, payload_bytes)) => match parse_payload_chain(payload_bytes, header.next_payload) {
-                Ok(payloads) => fmt_header_and_payloads(header, payloads.as_slice(), f),
-                Err(err) => {
-                    fmt_header(header, f)?;
-                    write!(
-                        f,
-                        " payload-parse-error={err} declared_len={} payload_bytes={}",
-                        header.length.to_native(),
-                        self.0.len().saturating_sub(crate::payload::IKE_HEADER_LEN)
-                    )
+            Ok((header, payload_bytes)) => {
+                match parse_payload_chain(payload_bytes, header.next_payload) {
+                    Ok(payloads) => fmt_header_and_payloads(header, payloads.as_slice(), f),
+                    Err(err) => {
+                        fmt_header(header, f)?;
+                        write!(
+                            f,
+                            " payload-parse-error={err} declared_len={} payload_bytes={}",
+                            header.length.to_native(),
+                            self.0.len().saturating_sub(crate::payload::IKE_HEADER_LEN)
+                        )
+                    }
                 }
-            },
+            }
             Err(err) => write!(f, "invalid-ike-packet len={} error={err}", self.0.len()),
         }
     }
@@ -183,7 +185,10 @@ impl Display for FmtPlaintextIke<'_> {
             name_u8_pair(&EXCHANGE_TYPE_NAMES, self.exchange_type),
             self.message_id
         )?;
-        match parse_payload_chain(Bytes::copy_from_slice(self.plaintext.as_ref()), self.first_payload) {
+        match parse_payload_chain(
+            Bytes::copy_from_slice(self.plaintext.as_ref()),
+            self.first_payload,
+        ) {
             Ok(payloads) => fmt_payload_slice(payloads.as_slice(), f)?,
             Err(err) => write!(f, " payload-parse-error={err}")?,
         }
@@ -204,11 +209,7 @@ impl Display for FmtEapPacket<'_> {
 }
 
 fn log_byte_dump(tag: &str, label: &str, bytes: &[u8]) {
-    log::debug!(
-        "[{tag}] {label}: => {} bytes @ {:p}",
-        bytes.len(),
-        bytes.as_ptr()
-    );
+    log::debug!("[{tag}] {label}: => {} bytes @ {:p}", bytes.len(), bytes.as_ptr());
     for (offset, chunk) in bytes.chunks(16).enumerate() {
         log::debug!(
             "[{tag}] {:>4}: {}  {}",
@@ -243,18 +244,18 @@ impl Display for FmtHexdumpBytes<'_> {
 impl Display for FmtHexdumpAscii<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for byte in self.0 {
-            let ch = if byte.is_ascii_graphic() || *byte == b' ' {
-                char::from(*byte)
-            } else {
-                '.'
-            };
+            let ch = if byte.is_ascii_graphic() || *byte == b' ' { char::from(*byte) } else { '.' };
             write!(f, "{ch}")?;
         }
         Ok(())
     }
 }
 
-fn fmt_header_and_payloads(header: IkeHeader, payloads: &[Payload], f: &mut Formatter<'_>) -> fmt::Result {
+fn fmt_header_and_payloads(
+    header: IkeHeader,
+    payloads: &[Payload],
+    f: &mut Formatter<'_>,
+) -> fmt::Result {
     fmt_header(header, f)?;
     write!(f, " [")?;
     if !payloads.is_empty() {
@@ -321,10 +322,14 @@ fn fmt_payload(payload: &Payload, f: &mut Formatter<'_>) -> fmt::Result {
             write!(f, "EAP/")?;
             fmt_eap_packet(&payload.body, f)
         }
-        PAYLOAD_TYPE_IDI | PAYLOAD_TYPE_IDR => fmt_id(payload.payload_type, payload.body.as_ref(), f),
+        PAYLOAD_TYPE_IDI | PAYLOAD_TYPE_IDR => {
+            fmt_id(payload.payload_type, payload.body.as_ref(), f)
+        }
         PAYLOAD_TYPE_SA => fmt_sa(payload.body.as_ref(), f),
         PAYLOAD_TYPE_CP => fmt_cp(payload.body.as_ref(), f),
-        PAYLOAD_TYPE_TSI | PAYLOAD_TYPE_TSR => fmt_ts(payload.payload_type, payload.body.as_ref(), f),
+        PAYLOAD_TYPE_TSI | PAYLOAD_TYPE_TSR => {
+            fmt_ts(payload.payload_type, payload.body.as_ref(), f)
+        }
         PAYLOAD_TYPE_SKF => fmt_skf(payload.body.as_ref(), f),
         _ => write!(f, "{}", name_u8_pair(&PAYLOAD_TYPE_NAMES, payload.payload_type)),
     }
@@ -389,14 +394,12 @@ fn fmt_sa(body: &[u8], f: &mut Formatter<'_>) -> fmt::Result {
 }
 
 fn fmt_proposal(body: &[u8], f: &mut Formatter<'_>) -> fmt::Result {
-    let header = pod_read_unaligned::<ProposalHeader>(&body[..std::mem::size_of::<ProposalHeader>()]);
+    let header =
+        pod_read_unaligned::<ProposalHeader>(&body[..std::mem::size_of::<ProposalHeader>()]);
     write!(
         f,
         "prop#{} proto={} spi_size={} xforms={}",
-        header.proposal_num,
-        header.protocol_id,
-        header.spi_size,
-        header.num_transforms
+        header.proposal_num, header.protocol_id, header.spi_size, header.num_transforms
     )?;
     if header.spi_size != 0 {
         let spi_start = std::mem::size_of::<ProposalHeader>();
@@ -444,7 +447,8 @@ fn fmt_proposal(body: &[u8], f: &mut Formatter<'_>) -> fmt::Result {
 }
 
 fn fmt_transform(body: &[u8], f: &mut Formatter<'_>) -> fmt::Result {
-    let header = pod_read_unaligned::<TransformHeader>(&body[..std::mem::size_of::<TransformHeader>()]);
+    let header =
+        pod_read_unaligned::<TransformHeader>(&body[..std::mem::size_of::<TransformHeader>()]);
     write!(
         f,
         "{}={}",
@@ -533,7 +537,10 @@ fn parse_payload_chain(mut buf: Bytes, mut next_payload: u8) -> Result<Vec<Paylo
             body,
         });
         if matches!(payload_type, PAYLOAD_TYPE_SK | PAYLOAD_TYPE_SKF) {
-            ensure!(buf.remaining() == 0, "{payload_type} payload must terminate the outer payload chain");
+            ensure!(
+                buf.remaining() == 0,
+                "{payload_type} payload must terminate the outer payload chain"
+            );
             break;
         }
     }
@@ -548,7 +555,11 @@ fn fmt_eap_packet(packet: &Bytes, f: &mut Formatter<'_>) -> fmt::Result {
     let identifier = packet[1];
     let declared_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
     if declared_len != packet.len() {
-        return write!(f, "{code} id=0x{identifier:02x} len={} declared={declared_len}", packet.len());
+        return write!(
+            f,
+            "{code} id=0x{identifier:02x} len={} declared={declared_len}",
+            packet.len()
+        );
     }
     if packet.len() == 4 {
         return write!(f, "{code} id=0x{identifier:02x}");

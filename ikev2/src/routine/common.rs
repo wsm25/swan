@@ -1,7 +1,5 @@
-use bytes::Bytes;
 use bytemuck::{Pod, Zeroable};
-use openssl::hash::MessageDigest;
-use openssl::pkey::Id;
+use bytes::Bytes;
 use std::net::SocketAddr;
 
 const_variant!(
@@ -71,8 +69,8 @@ pub(super) struct NotifyPayload<'a> {
 
 pub(super) struct ParsedSignatureAuth<'a> {
     pub hash_algorithm: u16,
-    pub digest: MessageDigest,
-    pub public_key_type: Id,
+    pub hash: Box<crate::cipher::Hasher>,
+    pub public_key_type: crate::cipher::PKeyKind,
     pub signature: &'a [u8],
 }
 

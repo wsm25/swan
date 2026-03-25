@@ -19,11 +19,8 @@ impl Ikev2Routine {
         packet: Bytes,
     ) -> Result<()> {
         crate::debug_fmt::log_ike("send", &packet);
-        let dst = self
-            .transport
-            .as_ref()
-            .context("missing transport for outbound IKE packet")?
-            .peer_addr;
+        let dst =
+            self.transport.as_ref().context("missing transport for outbound IKE packet")?.peer_addr;
         let packet = self.encode_outbound_udp_packet(OutboundUdpPacket::Ike { packet, dst })?;
         futures::SinkExt::send(udp_conn, packet).await.context("send udp packet")
     }
@@ -49,7 +46,10 @@ impl Ikev2Routine {
         self.send_packets(udp_conn, packets).await
     }
 
-    pub(crate) fn encode_outbound_udp_packet(&self, packet: OutboundUdpPacket) -> Result<UdpPacket> {
+    pub(crate) fn encode_outbound_udp_packet(
+        &self,
+        packet: OutboundUdpPacket,
+    ) -> Result<UdpPacket> {
         let local_addr = self
             .transport
             .as_ref()
@@ -69,7 +69,9 @@ impl Ikev2Routine {
                 out.extend_from_slice(&packet);
                 Ok(UdpPacket { src: local_addr, dst, payload: out.freeze() })
             }
-            OutboundUdpPacket::Esp { packet, dst } => Ok(UdpPacket { src: local_addr, dst, payload: packet }),
+            OutboundUdpPacket::Esp { packet, dst } => {
+                Ok(UdpPacket { src: local_addr, dst, payload: packet })
+            }
         }
     }
 

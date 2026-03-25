@@ -101,6 +101,7 @@ impl UdpNatTConn {
         let (inbound_tx, inbound_rx) = futures_mpsc::unbounded();
         let socket = UdpSocket::bind(bind_addr)
             .with_context(|| format!("bind UDP socket to {bind_addr}"))?;
+        socket.connect(peer_addr)?;
         let mut conn = Self {
             inbound_rx,
             inbound_tx,
@@ -276,6 +277,30 @@ where
     }
 }
 
+async fn start_and_print_events(
+    interface: &mut Ikev2Interface,
+    events: &mut (impl Stream<Item = Ikev2Event> + Unpin),
+) -> Result<()> {
+    let start = interface.start().fuse();
+    futures::pin_mut!(start);
+    loop {
+        let event = events.next().fuse();
+        futures::pin_mut!(event);
+        select! {
+            result = start => {
+                drain_events(events);
+                return result;
+            }
+            event = event => {
+                let Some(event) = event else {
+                    continue;
+                };
+                println!("event: {}", format_event(&event));
+            }
+        }
+    }
+}
+
 fn hex_prefix(bytes: &[u8], max_len: usize) -> String {
     use std::fmt::Write as _;
     let shown = bytes.len().min(max_len);
@@ -290,6 +315,30 @@ fn format_event(event: &Ikev2Event) -> String {
     match event {
         Ikev2Event::Starting => "Starting".to_string(),
         Ikev2Event::HandshakeStarted => "HandshakeStarted".to_string(),
+        Ikev2Event::StageChanged(stage) => format!(
+            "StageChanged({})",
+            match stage {
+                ikev2::Ikev2Stage::IkeInit => "ike_init",
+                ikev2::Ikev2Stage::IkeAuth => "ike_auth",
+                ikev2::Ikev2Stage::Eap => "eap",
+                ikev2::Ikev2Stage::ChildSa => "child_sa",
+                ikev2::Ikev2Stage::Running => "running",
+            }
+        ),
+        Ikev2Event::NegotiatedAlgorithm(alg) => format!(
+            "NegotiatedAlgorithm(protocol={}, encr={}, integ={}, prf={}, dh={})",
+            alg.protocol,
+            alg.encryption,
+            alg.integrity.as_deref().unwrap_or("-"),
+            alg.prf.as_deref().unwrap_or("-"),
+            alg.dh.as_deref().unwrap_or("-"),
+        ),
+        Ikev2Event::EapProcess(process) => format!(
+            "EapProcess(method={}, state={}, round={})",
+            process.method,
+            process.state,
+            process.round.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string())
+        ),
         Ikev2Event::HandshakeCompleted => "HandshakeCompleted".to_string(),
         Ikev2Event::ConfigAssigned(config) => format!(
             "ConfigAssigned(ipv4={:?}, ipv6={:?}, dns4={:?}, dns6={:?})",
@@ -302,18 +351,18 @@ fn format_event(event: &Ikev2Event) -> String {
     }
 }
 
-fn build_config(peer_ip: IpAddr) -> Result<Ikev2Config> {
+fn build_config(peer: SocketAddr) -> Result<Ikev2Config> {
     Ikev2Config::builder()
-        .ike_suite_strongswan("aes256-sha512-curve25519")?
-        .esp_suite_strongswan("aes256-sha512-curve25519")?
-        .peer_ip(peer_ip)
+        .ike_suite_strongswan("aes128gcm16-aes256gcm16-prfsha512-prfsha512-curve25519")?
+        .esp_suite_strongswan("aes128gcm16-aes256gcm16-prfsha256-prfsha512-curve25519")?
+        .peer(peer)
         .eap_method("peap")?
         .idi("%config")?
         .eap_identity("testuser")?
         .eap_password("password")?
         .aaa_identity("@radius.net.sjtu.edu.cn")?
         .rightid("@stu.vpn.sjtu.edu.cn")?
-        .peap_tls13_strongswan_compat(false)
+        .strongswan_compatible(true)
         .build()
 }
 
@@ -329,15 +378,13 @@ fn main() -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let udp_conn = UdpNatTConn::connect(bind_addr, peer_addr)?;
     let local_addr = udp_conn.local_addr()?;
-    let config = build_config(peer_addr.ip())?;
+    let config = build_config(peer_addr)?;
 
     let mut interface = Ikev2Interface::new(config, Box::new(udp_conn));
     let mut events = interface.event();
 
     println!("connecting to {peer_addr} from {local_addr} ...");
-    let start_result = block_on(interface.start());
-    drain_events(&mut events);
-    start_result.context("IKEv2 start failed")?;
+    block_on(start_and_print_events(&mut interface, &mut events)).context("IKEv2 start failed")?;
 
     println!("connected. press Enter to stop.");
     let (stop_tx, mut stop_rx) = futures_mpsc::unbounded::<()>();

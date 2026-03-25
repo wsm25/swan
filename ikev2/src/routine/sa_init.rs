@@ -14,6 +14,7 @@ use crate::{
         IKE_HEADER_LEN, IkeFlags, IkeHeader, IkeMessageBuilder, PAYLOAD_TYPE_KE,
         PAYLOAD_TYPE_NONCE, PAYLOAD_TYPE_NOTIFY, PAYLOAD_TYPE_SA, Payload,
     },
+    routine::common::NotifyHeader,
 };
 use bytemuck::bytes_of;
 
@@ -36,6 +37,7 @@ impl Ikev2Routine {
                 SaInitOutcome::Established => {
                     self.sa.sa_init_response = Some(response);
                     self.derive_ike_sa_keys()?;
+                    self.emit_negotiated_ike_algorithms()?;
                     self.sa.next_request_message_id = 1;
                     self.sa.expected_response_message_id = None;
                     self.sa.state = super::IkeSaState::IkeSaInitEstablished;
@@ -62,10 +64,10 @@ impl Ikev2Routine {
             None => self.first_ike_selection()?,
         };
         if self.sa.initiator_spi == 0 {
-            self.sa.initiator_spi = Self::generate_spi()?;
+            self.sa.initiator_spi = Self::generate_spi();
         }
         if self.sa.initiator_nonce.is_none() {
-            self.sa.initiator_nonce = Some(Self::generate_nonce()?);
+            self.sa.initiator_nonce = Some(Bytes::from_owner(Self::generate_nonce()));
         }
 
         let local_keypair = (local_selection.dh.generate_keypair)().context("generate local KE")?;
@@ -92,44 +94,41 @@ impl Ikev2Routine {
         ))));
         if let Some(cookie) = self.sa.sa_init_cookie.clone() {
             builder.push_payload(PAYLOAD_TYPE_NOTIFY, false, |buf| {
-                Self::append_notify_payload(buf, NOTIFY_TYPE_COOKIE, cookie.as_ref());
-                Ok(())
-            })?;
+                Self::append_notify_payload(buf, NOTIFY_TYPE_COOKIE, cookie.as_ref())
+            });
         }
-        builder.push_payload(PAYLOAD_TYPE_SA, false, |buf| {
+        builder.try_push_payload(PAYLOAD_TYPE_SA, false, |buf| {
             self.append_sa_proposals(buf, &self.config.ike_suite)
         })?;
-        builder.push_payload(PAYLOAD_TYPE_KE, false, |buf| {
+        builder.try_push_payload(PAYLOAD_TYPE_KE, false, |buf| {
             self.append_ke_payload(
                 buf,
                 self.sa.initiator_ke.as_ref().context("initiator KE missing")?,
             );
             Ok(())
         })?;
-        builder.push_payload(PAYLOAD_TYPE_NONCE, false, |buf| {
-            buf.extend_from_slice(&nonce);
-            Ok(())
-        })?;
-        builder.push_payload(PAYLOAD_TYPE_NOTIFY, false, |buf| {
-            Self::append_notify_payload(buf, NOTIFY_TYPE_NAT_DETECTION_SOURCE_IP, natd.0.as_ref());
-            Ok(())
-        })?;
-        builder.push_payload(PAYLOAD_TYPE_NOTIFY, false, |buf| {
-            Self::append_notify_payload(
-                buf,
-                NOTIFY_TYPE_NAT_DETECTION_DESTINATION_IP,
-                natd.1.as_ref(),
-            );
-            Ok(())
-        })?;
-        builder.push_payload(PAYLOAD_TYPE_NOTIFY, false, |buf| {
-            Self::append_notify_payload(buf, NOTIFY_TYPE_FRAGMENTATION_SUPPORTED, &[]);
-            Ok(())
-        })?;
-        builder.push_payload(PAYLOAD_TYPE_NOTIFY, false, |buf| {
-            Self::append_signature_hash_algorithms_notify(buf);
-            Ok(())
-        })?;
+        builder.push_payload(PAYLOAD_TYPE_NONCE, false, |buf| buf.extend_from_slice(&nonce));
+
+        // notify
+        macro_rules! append_notify {
+            ($notify_type:expr, $data:expr) => {
+                builder.push_payload(PAYLOAD_TYPE_NOTIFY, false, |out| {
+                    out.extend_from_slice(bytes_of(&NotifyHeader {
+                        protocol_id: 0,
+                        spi_size: 0,
+                        notify_type: $notify_type.into(),
+                    }));
+                    out.extend_from_slice($data);
+                })
+            };
+        }
+        append_notify!(NOTIFY_TYPE_NAT_DETECTION_SOURCE_IP, natd.0.as_ref());
+        append_notify!(NOTIFY_TYPE_NAT_DETECTION_DESTINATION_IP, natd.1.as_ref());
+        append_notify!(NOTIFY_TYPE_FRAGMENTATION_SUPPORTED, &[]);
+        append_notify!(
+            NOTIFY_TYPE_SIGNATURE_HASH_ALGORITHMS,
+            &Self::signature_hash_algorithms_notify()
+        );
 
         let packet = Self::finalize_packet(builder)?;
         ensure!(packet.len() > IKE_HEADER_LEN, "failed to build outbound ike_sa_init");
@@ -141,7 +140,8 @@ impl Ikev2Routine {
         header: crate::payload::IkeHeader,
         payloads: &[Payload],
     ) -> Result<SaInitOutcome> {
-        let responder_spi = u64::from_be_bytes(bytemuck::bytes_of(&header.responder_spi).try_into().unwrap());
+        let responder_spi =
+            u64::from_be_bytes(bytemuck::bytes_of(&header.responder_spi).try_into().unwrap());
         let zero_spi_cookie_response = responder_spi == 0;
         let mut sa_selection = None;
         let mut responder_nonce = None;
@@ -262,7 +262,7 @@ impl Ikev2Routine {
 
     fn derive_ike_sa_keys(&mut self) -> Result<()> {
         let selection = self.selected_ike_proposal()?.clone();
-        let local_dh = self.local_dh.as_ref().context("missing local dh keypair")?;
+        let local_dh = self.local_dh.take().context("missing local dh keypair")?;
         let responder_ke = self.sa.responder_ke.as_ref().context("missing responder ke")?;
         let responder_nonce =
             self.sa.responder_nonce.as_ref().context("missing responder nonce")?;
@@ -279,7 +279,7 @@ impl Ikev2Routine {
         crate::debug_fmt::log_ike_bytes("dh_shared_secret =>", shared.as_ref());
         crate::debug_fmt::log_ike_bytes("skeyseed_seed =>", nonce_seed.as_ref());
         let skeyseed =
-            (prf.gen_prf)(nonce_seed.as_ref(), shared.as_ref()).context("derive SKEYSEED")?;
+            prf.gen_prf_vec(nonce_seed.as_ref(), shared.as_ref()).context("derive SKEYSEED")?;
         crate::debug_fmt::log_ike_bytes("skeyseed =>", skeyseed.as_ref());
 
         let mut seed = Vec::with_capacity(initiator_nonce.len() + responder_nonce.len() + 16);
@@ -289,11 +289,15 @@ impl Ikev2Routine {
         seed.extend_from_slice(&self.sa.responder_spi.to_be_bytes());
         crate::debug_fmt::log_ike_bytes("prf+ seed =>", seed.as_ref());
 
-        let integ_len = selection.integrity.key_len_hint;
+        let integ_len = if selection.encryption.is_aead {
+            0
+        } else {
+            selection.integrity.key_len_hint
+        };
         let enc_len = selection.encryption.key_len;
         let prf_len = prf.output_len;
         let keymat = Self::prf_plus(
-            prf.gen_prf,
+            prf,
             &skeyseed,
             seed.as_ref(),
             prf_len + integ_len * 2 + enc_len * 2 + prf_len * 2,

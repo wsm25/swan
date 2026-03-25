@@ -12,9 +12,10 @@ impl Ikev2Routine {
         let local_addr = udp_conn.local_addr().context("query local UDP socket address")?;
         let peer_addr = match &self.config.peer {
             crate::config::PeerAddress::Ip(addr) => *addr,
-            crate::config::PeerAddress::Domain(_) => {
-                SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), IKEV2_NAT_T_PORT)
-            }
+            crate::config::PeerAddress::Domain(_) => SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                IKEV2_NAT_T_PORT,
+            ),
         };
         let local_addr = SocketAddr::new(local_addr.ip(), IKEV2_NAT_T_PORT);
         self.transport = Some(TransportSetup { local_addr, peer_addr, natt_active: true });

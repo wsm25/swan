@@ -2,8 +2,7 @@ use anyhow::{Context, Result, bail, ensure};
 use bytes::{Bytes, BytesMut};
 
 use super::{
-    Ikev2Routine, InboundControlOutcome, common::PROTOCOL_ID_ESP,
-    delete_exchange::DeletePayload,
+    Ikev2Routine, InboundControlOutcome, common::PROTOCOL_ID_ESP, delete_exchange::DeletePayload,
 };
 use crate::{
     IkeSaState, UdpConn,
@@ -17,8 +16,8 @@ impl Ikev2Routine {
         udp_conn: &mut dyn UdpConn,
         packet: Bytes,
     ) -> Result<InboundControlOutcome> {
-        let (header, _) =
-            PayloadParser::split_header(packet.clone()).context("parse inbound IKE control header")?;
+        let (header, _) = PayloadParser::split_header(packet.clone())
+            .context("parse inbound IKE control header")?;
         let flags = header.flags()?;
         ensure!(
             header.exchange_type == crate::consts::EXCHANGE_TYPE_INFORMATIONAL,
@@ -74,7 +73,10 @@ impl Ikev2Routine {
         );
         ensure!(header.version == 0x20, "unexpected IKE version: {}", header.version);
         let flags = header.flags()?;
-        ensure!(!flags.contains(IkeFlags::RESPONSE), "inbound informational packet must be a request");
+        ensure!(
+            !flags.contains(IkeFlags::RESPONSE),
+            "inbound informational packet must be a request"
+        );
         let request_message_id = header.message_id.to_native();
         ensure!(request_message_id > 0, "inbound IKE informational request missing message-id");
         Ok((request_message_id, payloads))
@@ -122,7 +124,10 @@ impl Ikev2Routine {
             }
         }
         ensure!(!delete_payloads.is_empty(), "inbound IKE control packet missing DELETE payload");
-        ensure!(delete_payloads.len() == 1, "inbound IKE control packet has multiple DELETE payloads");
+        ensure!(
+            delete_payloads.len() == 1,
+            "inbound IKE control packet has multiple DELETE payloads"
+        );
         Self::decode_delete_payload(delete_payloads.pop().unwrap().as_ref())
     }
 

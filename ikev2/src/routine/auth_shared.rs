@@ -1,22 +1,20 @@
-use anyhow::{Context, Result, ensure};
-use bytemuck::{Pod, Zeroable, bytes_of};
-use bytes::{BufMut, Bytes, BytesMut};
-use openssl::x509::X509NameBuilder;
-
 use super::Ikev2Routine;
 use crate::{
+    cipher::rand_bytes,
     consts::{
         CONFIG_ATTR_INTERNAL_IP4_ADDRESS, CONFIG_ATTR_INTERNAL_IP4_DNS,
-        CONFIG_ATTR_INTERNAL_IP6_ADDRESS, CONFIG_ATTR_INTERNAL_IP6_DNS,
-        EXCHANGE_TYPE_IKE_AUTH, EXCHANGE_TYPE_INFORMATIONAL, ID_TYPE_DER_ASN1_DN, ID_TYPE_FQDN,
-        ID_TYPE_IPV4_ADDR, ID_TYPE_IPV6_ADDR, ID_TYPE_KEY_ID, ID_TYPE_RFC822_ADDR,
-        NOTIFY_TYPE_AUTHENTICATION_FAILED,
+        CONFIG_ATTR_INTERNAL_IP6_ADDRESS, CONFIG_ATTR_INTERNAL_IP6_DNS, EXCHANGE_TYPE_IKE_AUTH,
+        EXCHANGE_TYPE_INFORMATIONAL, ID_TYPE_FQDN, ID_TYPE_IPV4_ADDR, ID_TYPE_IPV6_ADDR,
+        ID_TYPE_KEY_ID, ID_TYPE_RFC822_ADDR, NOTIFY_TYPE_AUTHENTICATION_FAILED,
     },
     payload::{
         IkeHeader, IkeMessageBuilder, PAYLOAD_HEADER_LEN, PAYLOAD_TYPE_NONE, PAYLOAD_TYPE_NOTIFY,
         Payload, PayloadHeader, PayloadParseResult, PayloadParser,
     },
 };
+use anyhow::Result;
+use bytemuck::{Pod, Zeroable, bytes_of};
+use bytes::{BufMut, Bytes, BytesMut};
 
 const IKE_FRAGMENT_PLAINTEXT_LIMIT: usize = 1024;
 
@@ -240,26 +238,6 @@ impl Ikev2Routine {
         Bytes::from(payload)
     }
 
-    pub(super) fn encoded_id_value(id_type: u8, id_value: &str) -> Result<Bytes> {
-        if id_type != ID_TYPE_DER_ASN1_DN {
-            return Ok(Bytes::copy_from_slice(id_value.as_bytes()));
-        }
-
-        let mut builder = X509NameBuilder::new().context("create X509 DN builder")?;
-        for component in id_value.split(',') {
-            let (name, value) =
-                component.split_once('=').context("invalid DN component, expected name=value")?;
-            let name = name.trim();
-            let value = value.trim();
-            ensure!(!name.is_empty(), "DN component name must not be empty");
-            ensure!(!value.is_empty(), "DN component value must not be empty");
-            builder
-                .append_entry_by_text(name, value)
-                .with_context(|| format!("append DN component {name}"))?;
-        }
-        Ok(Bytes::from(builder.build().to_der().context("encode DN to DER")?))
-    }
-
     pub(super) fn append_id_payload_typed(payload: &mut impl BufMut, id_type: u8, id: &[u8]) {
         payload.put_slice(bytes_of(&IdPayloadHeader { id_type, reserved: [0; 3] }));
         payload.put_slice(id);
@@ -277,9 +255,6 @@ impl Ikev2Routine {
             .or_else(|| value.strip_prefix('#'))
         {
             return (ID_TYPE_KEY_ID, key_id);
-        }
-        if let Some(dn) = value.strip_prefix("dn:").or_else(|| value.strip_prefix('=')) {
-            return (ID_TYPE_DER_ASN1_DN, dn);
         }
         if let Some(fqdn) = value
             .strip_prefix("fqdn:")
@@ -319,11 +294,8 @@ impl Ikev2Routine {
         (ID_TYPE_FQDN, value)
     }
 
-    pub(super) fn append_cp_request_address_and_dns_requests(payload: &mut BytesMut) {
-        payload.extend_from_slice(bytes_of(&ConfigPayloadHeader {
-            cfg_type: 1,
-            reserved: [0; 3],
-        }));
+    pub(super) fn append_cp_requests(payload: &mut BytesMut) {
+        payload.extend_from_slice(bytes_of(&ConfigPayloadHeader { cfg_type: 1, reserved: [0; 3] }));
         for attr_type in [
             CONFIG_ATTR_INTERNAL_IP4_ADDRESS,
             CONFIG_ATTR_INTERNAL_IP6_ADDRESS,
@@ -385,14 +357,16 @@ impl Ikev2Routine {
         }));
         payload.extend_from_slice(&std::net::Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0).octets());
         payload.extend_from_slice(
-            &std::net::Ipv6Addr::new(0x3fff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff)
-                .octets(),
+            &std::net::Ipv6Addr::new(
+                0x3fff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+            )
+            .octets(),
         );
     }
 
-    pub(super) fn generate_child_spi() -> Result<u32> {
+    pub(super) fn generate_child_spi() -> u32 {
         let mut bytes = [0u8; 4];
-        openssl::rand::rand_bytes(&mut bytes).context("generate CHILD_SA SPI")?;
-        Ok(u32::from_be_bytes(bytes).max(1))
+        rand_bytes(&mut bytes);
+        u32::from_be_bytes(bytes).max(1)
     }
 }

@@ -1,10 +1,9 @@
 use anyhow::{Context, Result, anyhow, ensure};
-use bytes::Bytes;
-use openssl::hash::{MessageDigest, hash};
-use openssl::provider::Provider;
-use openssl::rand::rand_bytes;
-use openssl::symm::{Cipher, Crypter, Mode};
-use std::sync::OnceLock;
+use bytes::{BufMut, Bytes};
+
+use crate::cipher::{Sha1, des_encrypt_block, rand_bytes};
+use crate::eap::mschapv2::md4;
+use crate::eap::{EAP_TYPE_MSCHAPV2, build_eap_response};
 
 const MAGIC1: &[u8] = b"Magic server to client signing constant";
 const MAGIC2: &[u8] = b"Pad to make it do more than one iteration";
@@ -27,9 +26,9 @@ const VALUE_SIZE: u8 = 49;
 
 pub(crate) struct Mschapv2State {
     mschap_id: u8,
-    expecting_success: bool,
+    pub expecting_success: bool,
     expected_auth_response: String,
-    msk: Box<[u8]>,
+    pub msk: Box<[u8]>,
 }
 
 pub(crate) enum Mschapv2Step {
@@ -65,7 +64,7 @@ pub(crate) fn on_request(
             auth_challenge.copy_from_slice(challenge);
 
             let mut peer_challenge = [0u8; CHALLENGE_LEN];
-            rand_bytes(&mut peer_challenge).context("generate mschapv2 peer challenge")?;
+            rand_bytes(&mut peer_challenge);
 
             let username = extract_username(identity);
             let nt_response = generate_nt_response(
@@ -95,7 +94,7 @@ pub(crate) fn on_request(
                 &peer_challenge,
                 &nt_response,
                 identity.as_bytes(),
-            )))
+            )?))
         }
         OPCODE_SUCCESS => {
             let current = state
@@ -115,7 +114,7 @@ pub(crate) fn on_request(
                 expected_auth_response: current.expected_auth_response.clone(),
                 msk: current.msk.clone(),
             });
-            Ok(Mschapv2Step::Outbound(encode_success(eap_identifier)))
+            Ok(Mschapv2Step::Outbound(encode_success(eap_identifier)?))
         }
         OPCODE_FAILURE => {
             let current = state
@@ -139,14 +138,6 @@ pub(crate) fn on_request(
         }
         other => Ok(Mschapv2Step::Failure(format!("unsupported mschapv2 opcode {other}"))),
     }
-}
-
-pub(crate) fn msk(state: &Option<Mschapv2State>) -> Option<Box<[u8]>> {
-    state.as_ref().map(|value| value.msk.clone())
-}
-
-pub(crate) fn expecting_success(state: &Option<Mschapv2State>) -> bool {
-    state.as_ref().is_some_and(|value| value.expecting_success)
 }
 
 struct ParsedMschapv2 {
@@ -175,38 +166,29 @@ fn encode_response(
     peer_challenge: &[u8; CHALLENGE_LEN],
     nt_response: &[u8; NT_RESPONSE_LEN],
     identity: &[u8],
-) -> Bytes {
-    let mut body = Vec::with_capacity(4 + 1 + 16 + 8 + 24 + 1 + identity.len());
-    body.push(OPCODE_RESPONSE);
-    body.push(mschap_id);
-    body.extend_from_slice(&[0, 0]);
-    body.push(VALUE_SIZE);
-    body.extend_from_slice(peer_challenge);
-    body.extend_from_slice(&[0u8; 8]);
-    body.extend_from_slice(nt_response);
-    body.push(0);
-    body.extend_from_slice(identity);
-    let len = body.len() as u16;
-    body[2..4].copy_from_slice(&len.to_be_bytes());
-
-    let total_len = 5 + body.len();
-    let mut out = Vec::with_capacity(total_len);
-    out.push(2);
-    out.push(eap_identifier);
-    out.extend_from_slice(&(total_len as u16).to_be_bytes());
-    out.push(26);
-    out.extend_from_slice(&body);
-    Bytes::from(out)
+) -> Result<Bytes> {
+    let length_hint = 4 + 1 + 16 + 8 + 24 + 1 + identity.len();
+    build_eap_response(eap_identifier, EAP_TYPE_MSCHAPV2, length_hint, |body| {
+        body.put_u8(OPCODE_RESPONSE);
+        body.put_u8(mschap_id);
+        body.extend_from_slice(&[0, 0]);
+        body.put_u8(VALUE_SIZE);
+        body.extend_from_slice(peer_challenge);
+        body.extend_from_slice(&[0u8; 8]);
+        body.extend_from_slice(nt_response);
+        body.put_u8(0);
+        body.extend_from_slice(identity);
+        let len: u16 = body.len().try_into()?;
+        body[2..4].copy_from_slice(&len.to_be_bytes());
+        Ok(())
+    })
 }
 
-fn encode_success(eap_identifier: u8) -> Bytes {
-    let mut out = Vec::with_capacity(6);
-    out.push(2);
-    out.push(eap_identifier);
-    out.extend_from_slice(&(6u16).to_be_bytes());
-    out.push(26);
-    out.push(OPCODE_SUCCESS);
-    Bytes::from(out)
+fn encode_success(eap_identifier: u8) -> Result<Bytes> {
+    build_eap_response(eap_identifier, EAP_TYPE_MSCHAPV2, 1, |b| {
+        b.put_u8(OPCODE_SUCCESS);
+        Ok(())
+    })
 }
 
 fn parse_failure_tokens(payload: &[u8]) -> Result<()> {
@@ -255,21 +237,6 @@ fn parse_failure_tokens(payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn ensure_legacy_provider_loaded() {
-    static LEGACY_PROVIDER: OnceLock<Option<Provider>> = OnceLock::new();
-    let _ = LEGACY_PROVIDER.get_or_init(|| Provider::try_load(None, "legacy", true).ok());
-}
-
-fn md4(input: &[u8]) -> Result<Vec<u8>> {
-    ensure_legacy_provider_loaded();
-    let md = MessageDigest::from_name("MD4").ok_or_else(|| anyhow!("md4 digest is unavailable"))?;
-    Ok(hash(md, input).context("md4")?.to_vec())
-}
-
-fn sha1_bytes(input: &[u8]) -> Result<Vec<u8>> {
-    Ok(hash(MessageDigest::sha1(), input).context("sha1")?.to_vec())
-}
-
 fn utf16le(input: &str) -> Vec<u8> {
     input.encode_utf16().flat_map(|value| value.to_le_bytes()).collect()
 }
@@ -298,31 +265,16 @@ fn expand_des_key(key7: &[u8; 7]) -> [u8; 8] {
     out
 }
 
-fn des_encrypt_block(key8: &[u8; 8], block8: &[u8; 8]) -> Result<[u8; 8]> {
-    ensure_legacy_provider_loaded();
-    let cipher = Cipher::des_ecb();
-    let mut crypter =
-        Crypter::new(cipher, Mode::Encrypt, key8, None).context("create des crypter")?;
-    crypter.pad(false);
-    let mut out = [0u8; 16];
-    let count = crypter.update(block8, &mut out).context("des update")?;
-    let rest = crypter.finalize(&mut out[count..]).context("des finalize")?;
-    ensure!(count + rest == 8, "unexpected des block output length");
-    let mut block = [0u8; 8];
-    block.copy_from_slice(&out[..8]);
-    Ok(block)
-}
-
 fn challenge_hash(
     peer_challenge: &[u8; CHALLENGE_LEN],
     auth_challenge: &[u8; CHALLENGE_LEN],
     username: &[u8],
 ) -> Result<[u8; 8]> {
-    let mut data = Vec::with_capacity(32 + username.len());
-    data.extend_from_slice(peer_challenge);
-    data.extend_from_slice(auth_challenge);
-    data.extend_from_slice(username);
-    let digest = sha1_bytes(&data)?;
+    let digest = Sha1::begin()
+        .chain_update(peer_challenge)
+        .chain_update(auth_challenge)
+        .chain_update(username)
+        .finalize();
     let mut out = [0u8; 8];
     out.copy_from_slice(&digest[..8]);
     Ok(out)
@@ -335,7 +287,7 @@ fn generate_nt_response(
     password: &str,
 ) -> Result<[u8; NT_RESPONSE_LEN]> {
     let challenge = challenge_hash(peer_challenge, auth_challenge, username)?;
-    let password_hash = md4(&utf16le(password))?;
+    let password_hash = md4(&utf16le(password));
     ensure!(password_hash.len() == 16, "invalid password hash length");
     let mut zpwd = [0u8; 21];
     zpwd[..16].copy_from_slice(&password_hash);
@@ -358,52 +310,44 @@ fn generate_authenticator_response(
     password: &str,
     nt_response: &[u8; NT_RESPONSE_LEN],
 ) -> Result<String> {
-    let password_hash = md4(&utf16le(password))?;
-    let password_hash_hash = md4(&password_hash)?;
+    let password_hash = md4(&utf16le(password));
+    let password_hash_hash = md4(&password_hash);
 
-    let mut first = Vec::with_capacity(password_hash_hash.len() + nt_response.len() + MAGIC1.len());
-    first.extend_from_slice(&password_hash_hash);
-    first.extend_from_slice(nt_response);
-    first.extend_from_slice(MAGIC1);
-    let first = sha1_bytes(&first)?;
-
+    let first = Sha1::begin()
+        .chain_update(password_hash_hash)
+        .chain_update(nt_response)
+        .chain_update(MAGIC1)
+        .finalize();
     let challenge = challenge_hash(peer_challenge, auth_challenge, username)?;
-    let mut second = Vec::with_capacity(first.len() + challenge.len() + MAGIC2.len());
-    second.extend_from_slice(&first);
-    second.extend_from_slice(&challenge);
-    second.extend_from_slice(MAGIC2);
-    let second = sha1_bytes(&second)?;
-
-    Ok(second.iter().map(|byte| format!("{byte:02X}")).collect())
+    let second =
+        Sha1::begin().chain_update(first).chain_update(challenge).chain_update(MAGIC2).finalize();
+    Ok(hex::encode_upper(second))
 }
 
 fn generate_msk(password: &str, nt_response: &[u8; NT_RESPONSE_LEN]) -> Result<Box<[u8]>> {
-    let password_hash = md4(&utf16le(password))?;
-    let password_hash_hash = md4(&password_hash)?;
+    let password_hash = md4(&utf16le(password));
+    let password_hash_hash = md4(&password_hash);
 
-    let mut master_input =
-        Vec::with_capacity(password_hash_hash.len() + nt_response.len() + MSK_MAGIC1.len());
-    master_input.extend_from_slice(&password_hash_hash);
-    master_input.extend_from_slice(nt_response);
-    master_input.extend_from_slice(MSK_MAGIC1);
-    let master_key = sha1_bytes(&master_input)?;
+    let master_key = Sha1::begin()
+        .chain_update(password_hash_hash)
+        .chain_update(nt_response)
+        .chain_update(MSK_MAGIC1)
+        .finalize();
     let master = &master_key[..16];
 
-    let mut recv_input =
-        Vec::with_capacity(master.len() + SHAPAD1.len() + MSK_MAGIC2.len() + SHAPAD2.len());
-    recv_input.extend_from_slice(master);
-    recv_input.extend_from_slice(&SHAPAD1);
-    recv_input.extend_from_slice(MSK_MAGIC2);
-    recv_input.extend_from_slice(&SHAPAD2);
-    let recv = sha1_bytes(&recv_input)?;
+    let recv = Sha1::begin()
+        .chain_update(master)
+        .chain_update(SHAPAD1)
+        .chain_update(MSK_MAGIC2)
+        .chain_update(SHAPAD2)
+        .finalize();
 
-    let mut send_input =
-        Vec::with_capacity(master.len() + SHAPAD1.len() + MSK_MAGIC3.len() + SHAPAD2.len());
-    send_input.extend_from_slice(master);
-    send_input.extend_from_slice(&SHAPAD1);
-    send_input.extend_from_slice(MSK_MAGIC3);
-    send_input.extend_from_slice(&SHAPAD2);
-    let send = sha1_bytes(&send_input)?;
+    let send = Sha1::begin()
+        .chain_update(master)
+        .chain_update(SHAPAD1)
+        .chain_update(MSK_MAGIC3)
+        .chain_update(SHAPAD2)
+        .finalize();
 
     let mut out = Vec::with_capacity(64);
     out.extend_from_slice(&recv[..16]);

@@ -1,9 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use bytemuck::{Pod, Zeroable, bytes_of, pod_read_unaligned};
 use bytes::{BufMut, Bytes, BytesMut};
-use openssl::hash::{MessageDigest, hash};
-use openssl::rand::rand_bytes;
 use std::net::IpAddr;
+use std::collections::HashSet;
 
 use super::{
     Ikev2Routine,
@@ -13,14 +12,14 @@ use super::{
 };
 use crate::{
     AssignedConfig, Ikev2EapHandshake, KeyExchangePayload,
-    cipher::{DH_ALGS, ENCRYPTION_ALGS, INTEGRITY_ALGS, PRF_ALGS},
+    cipher::{DH_ALGS, ENCRYPTION_ALGS, INTEGRITY_ALGS, PRF_ALGS, Sha1, rand_bytes},
     config::{CipherSuite, CipherSuiteSelection},
     consts::{
         CFG_TYPE_REPLY, CONFIG_ATTR_INTERNAL_IP4_ADDRESS, CONFIG_ATTR_INTERNAL_IP4_DNS,
         CONFIG_ATTR_INTERNAL_IP6_ADDRESS, CONFIG_ATTR_INTERNAL_IP6_DNS, DELETE_PROTOCOL_ID_IKE,
-        NOTIFY_TYPE_SIGNATURE_HASH_ALGORITHMS, TRANSFORM_ATTR_FORMAT_TV_FLAG,
-        TRANSFORM_ATTR_TYPE_KEY_LENGTH, TRANSFORM_TYPE_DH, TRANSFORM_TYPE_ENCR, TRANSFORM_TYPE_ESN,
-        TRANSFORM_TYPE_INTEG, TRANSFORM_TYPE_LAST, TRANSFORM_TYPE_MORE, TRANSFORM_TYPE_PRF,
+        TRANSFORM_ATTR_FORMAT_TV_FLAG, TRANSFORM_ATTR_TYPE_KEY_LENGTH, TRANSFORM_TYPE_DH,
+        TRANSFORM_TYPE_ENCR, TRANSFORM_TYPE_ESN, TRANSFORM_TYPE_INTEG, TRANSFORM_TYPE_LAST,
+        TRANSFORM_TYPE_MORE, TRANSFORM_TYPE_PRF,
     },
     payload::{IKE_HEADER_LEN, IkeMessageBuilder, Payload, PayloadParseResult, PayloadParser},
 };
@@ -41,6 +40,8 @@ const_variant!(
 const ESN_ID_NO_EXT_SEQ: u16 = 0;
 const KE_PAYLOAD_FIXED_FIELDS_LEN: usize = 4;
 const NOTIFY_PAYLOAD_FIXED_FIELDS_LEN: usize = 4;
+const PROPOSAL_TYPE_LAST: u8 = 0;
+const PROPOSAL_TYPE_MORE: u8 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Zeroable, Pod)]
@@ -84,10 +85,34 @@ impl Ikev2Routine {
         suite.select(suite)
     }
 
-    pub(crate) fn first_esp_selection(&self) -> Result<CipherSuiteSelection> {
-        let suite =
-            self.config.esp_suite.first().ok_or_else(|| anyhow!("esp_suite is required"))?;
-        suite.select(suite)
+    pub(crate) fn selected_esp_proposal(&self) -> Result<&CipherSuiteSelection> {
+        self.selected_child_suite
+            .as_ref()
+            .ok_or_else(|| anyhow!("child proposal missing"))
+    }
+
+    fn child_sa_offer_variants(&self) -> Result<Vec<(CipherSuite, bool)>> {
+        ensure!(!self.config.esp_suite.is_empty(), "esp_suite is required");
+        let mut offers = Vec::new();
+        let mut seen = HashSet::new();
+        for suite in &self.config.esp_suite {
+            let key = (suite.encryption.clone(), suite.integrity.clone(), false);
+            if seen.insert(key) {
+                offers.push((suite.clone(), false));
+            }
+            let has_aead = suite
+                .encryption
+                .iter()
+                .filter_map(|alg| ENCRYPTION_ALGS.get(alg))
+                .any(|alg| alg.is_aead);
+            if self.config.strongswan_compatible && has_aead {
+                let compat_key = (suite.encryption.clone(), suite.integrity.clone(), true);
+                if seen.insert(compat_key) {
+                    offers.push((suite.clone(), true));
+                }
+            }
+        }
+        Ok(offers)
     }
 
     pub(super) fn first_ike_selection_for_dh_group(
@@ -112,13 +137,17 @@ impl Ikev2Routine {
         selected: CipherSuiteSelection,
     ) -> Result<()> {
         let remote = CipherSuite {
-            encryption: smallvec::smallvec![(
+            encryption: vec![(
                 selected.encryption.transform_id,
-                selected.encryption.key_len as u16
+                selected.encryption.transform_key_len as u16,
             )],
-            integrity: smallvec::smallvec![selected.integrity.transform_id],
-            prf: smallvec::smallvec![selected.prf.transform_id],
-            dh: smallvec::smallvec![selected.dh.transform_id],
+            integrity: if selected.encryption.is_aead {
+                Vec::new()
+            } else {
+                vec![selected.integrity.transform_id]
+            },
+            prf: vec![selected.prf.transform_id],
+            dh: vec![selected.dh.transform_id],
         };
         let local = self
             .config
@@ -137,38 +166,59 @@ impl Ikev2Routine {
     ) -> Result<()> {
         ensure!(!suites.is_empty(), "cipher suite list is empty");
         for (index, suite) in suites.iter().enumerate() {
-            let selection = suite.select(suite)?;
             let mut transforms = BytesMut::new();
-            self.append_transform(
-                &mut transforms,
-                TRANSFORM_TYPE_ENCR,
-                selection.encryption.transform_id,
-                &Self::encode_key_length_attr(Self::key_len_bytes_to_bits(
-                    selection.encryption.key_len,
-                )?),
-                false,
-            );
-            self.append_transform(
-                &mut transforms,
-                TRANSFORM_TYPE_PRF,
-                selection.prf.transform_id,
-                &[],
-                false,
-            );
-            self.append_transform(
-                &mut transforms,
-                TRANSFORM_TYPE_INTEG,
-                selection.integrity.transform_id,
-                &[],
-                false,
-            );
-            self.append_transform(
-                &mut transforms,
-                TRANSFORM_TYPE_DH,
-                selection.dh.transform_id,
-                &[],
-                true,
-            );
+            let mut transform_count = 0u8;
+            let has_aead = suite
+                .encryption
+                .iter()
+                .filter_map(|alg| ENCRYPTION_ALGS.get(alg))
+                .any(|alg| alg.is_aead);
+            for encryption in &suite.encryption {
+                let encryption = ENCRYPTION_ALGS
+                    .get(encryption)
+                    .with_context(|| format!("unsupported IKE encryption {:?}", encryption))?;
+                self.append_transform(
+                    &mut transforms,
+                    TRANSFORM_TYPE_ENCR,
+                    encryption.transform_id,
+                    &Self::encode_key_length_attr(Self::key_len_bytes_to_bits(
+                        encryption.transform_key_len,
+                    )?),
+                    false,
+                );
+                transform_count = transform_count.saturating_add(1);
+            }
+            for prf in &suite.prf {
+                let prf = PRF_ALGS.get(prf).with_context(|| format!("unsupported IKE PRF {:?}", prf))?;
+                self.append_transform(&mut transforms, TRANSFORM_TYPE_PRF, prf.transform_id, &[], false);
+                transform_count = transform_count.saturating_add(1);
+            }
+            if !has_aead {
+                for integrity in &suite.integrity {
+                    let integrity = INTEGRITY_ALGS
+                        .get(integrity)
+                        .with_context(|| format!("unsupported IKE integrity {:?}", integrity))?;
+                    self.append_transform(
+                        &mut transforms,
+                        TRANSFORM_TYPE_INTEG,
+                        integrity.transform_id,
+                        &[],
+                        false,
+                    );
+                    transform_count = transform_count.saturating_add(1);
+                }
+            }
+            for (dh_index, dh) in suite.dh.iter().enumerate() {
+                let dh = DH_ALGS.get(dh).with_context(|| format!("unsupported IKE DH {:?}", dh))?;
+                self.append_transform(
+                    &mut transforms,
+                    TRANSFORM_TYPE_DH,
+                    dh.transform_id,
+                    &[],
+                    dh_index + 1 == suite.dh.len(),
+                );
+                transform_count = transform_count.saturating_add(1);
+            }
             out.extend_from_slice(bytes_of(&ProposalHeader {
                 last_substructure: if index + 1 == suites.len() { 0 } else { 2 },
                 reserved: 0,
@@ -178,68 +228,91 @@ impl Ikev2Routine {
                 proposal_num: (index + 1) as u8,
                 protocol_id: 1,
                 spi_size: 0,
-                num_transforms: 4,
+                num_transforms: transform_count,
             }));
             out.extend_from_slice(&transforms);
         }
         Ok(())
     }
 
-    pub(super) fn append_child_sa_proposal(
+    pub(super) fn append_child_sa_proposals(
         &self,
         payload: &mut BytesMut,
-        suite: &CipherSuite,
+        suites: &[CipherSuite],
         spi: u32,
     ) -> Result<()> {
-        let mut transforms = BytesMut::new();
-        let mut transform_count = 0u8;
-        for encryption in &suite.encryption {
-            let encryption = ENCRYPTION_ALGS
-                .get(encryption)
-                .with_context(|| format!("unsupported CHILD_SA encryption {:?}", encryption))?;
-            transform_count = transform_count.saturating_add(1);
-            self.append_transform(
-                &mut transforms,
-                TRANSFORM_TYPE_ENCR,
-                encryption.transform_id,
-                &Self::encode_key_length_attr(Self::key_len_bytes_to_bits(encryption.key_len)?),
-                false,
-            );
+        let offers = self.child_sa_offer_variants()?;
+        ensure!(!offers.is_empty(), "esp_suite is required");
+        ensure!(!suites.is_empty(), "esp_suite is required");
+        for (index, (suite, omit_esn)) in offers.iter().enumerate() {
+            let mut transforms = BytesMut::new();
+            let has_aead = suite
+                .encryption
+                .iter()
+                .filter_map(|alg| ENCRYPTION_ALGS.get(alg))
+                .any(|alg| alg.is_aead);
+            let mut transform_count = 0u8;
+            for (enc_index, encryption) in suite.encryption.iter().enumerate() {
+                let encryption = ENCRYPTION_ALGS
+                    .get(encryption)
+                    .with_context(|| format!("unsupported CHILD_SA encryption {:?}", encryption))?;
+                let last_encr = enc_index + 1 == suite.encryption.len();
+                self.append_transform(
+                    &mut transforms,
+                    TRANSFORM_TYPE_ENCR,
+                    encryption.transform_id,
+                    &Self::encode_key_length_attr(Self::key_len_bytes_to_bits(
+                        encryption.transform_key_len,
+                    )?),
+                    has_aead && *omit_esn && last_encr,
+                );
+                transform_count = transform_count.saturating_add(1);
+            }
+            if !has_aead {
+                for integrity in &suite.integrity {
+                    let integrity = INTEGRITY_ALGS
+                        .get(integrity)
+                        .with_context(|| format!("unsupported CHILD_SA integrity {:?}", integrity))?;
+                    self.append_transform(
+                        &mut transforms,
+                        TRANSFORM_TYPE_INTEG,
+                        integrity.transform_id,
+                        &[],
+                        false,
+                    );
+                    transform_count = transform_count.saturating_add(1);
+                }
+            }
+            if !*omit_esn {
+                self.append_transform(
+                    &mut transforms,
+                    TRANSFORM_TYPE_ESN,
+                    ESN_ID_NO_EXT_SEQ,
+                    &[],
+                    true,
+                );
+                transform_count = transform_count.saturating_add(1);
+            }
+            payload.extend_from_slice(bytes_of(&ChildSaProposalHeader {
+                proposal: ProposalHeader {
+                    last_substructure: if index + 1 == offers.len() {
+                        PROPOSAL_TYPE_LAST
+                    } else {
+                        PROPOSAL_TYPE_MORE
+                    },
+                    reserved: 0,
+                    proposal_length: ((std::mem::size_of::<ChildSaProposalHeader>()
+                        + transforms.len()) as u16)
+                        .into(),
+                    proposal_num: (index + 1) as u8,
+                    protocol_id: 3,
+                    spi_size: 4,
+                    num_transforms: transform_count,
+                },
+                spi: spi.into(),
+            }));
+            payload.extend_from_slice(&transforms);
         }
-        let integrity = INTEGRITY_ALGS
-            .get(
-                &suite
-                    .integrity
-                    .first()
-                    .copied()
-                    .context("missing CHILD_SA integrity transform")?,
-            )
-            .context("unsupported CHILD_SA integrity transform")?;
-        transform_count = transform_count.saturating_add(1);
-        self.append_transform(
-            &mut transforms,
-            TRANSFORM_TYPE_INTEG,
-            integrity.transform_id,
-            &[],
-            false,
-        );
-        transform_count = transform_count.saturating_add(1);
-        self.append_transform(&mut transforms, TRANSFORM_TYPE_ESN, ESN_ID_NO_EXT_SEQ, &[], true);
-        payload.extend_from_slice(bytes_of(&ChildSaProposalHeader {
-            proposal: ProposalHeader {
-                last_substructure: 0,
-                reserved: 0,
-                proposal_length: ((std::mem::size_of::<ChildSaProposalHeader>() + transforms.len())
-                    as u16)
-                    .into(),
-                proposal_num: 1,
-                protocol_id: 3,
-                spi_size: 4,
-                num_transforms: transform_count,
-            },
-            spi: spi.into(),
-        }));
-        payload.extend_from_slice(&transforms);
         Ok(())
     }
 
@@ -298,7 +371,14 @@ impl Ikev2Routine {
     pub(super) fn decode_sa_selection(&self, payload: &[u8]) -> Result<CipherSuiteSelection> {
         let proposal = Self::parse_single_proposal(payload, PROTOCOL_ID_IKE, 0)?;
         let encryption = proposal.encryption.context("missing encryption transform")?;
-        let integrity = proposal.integrity.context("missing integrity transform")?;
+        if encryption.is_aead {
+            ensure!(proposal.integrity.is_none(), "unexpected integrity transform for AEAD IKE proposal");
+        }
+        let integrity = if encryption.is_aead {
+            &crate::cipher::AUTH_NONE_ALG
+        } else {
+            proposal.integrity.context("missing integrity transform")?
+        };
         let prf = proposal.prf.context("missing PRF transform")?;
         let dh = proposal.dh.context("missing DH transform")?;
         ensure!(proposal.esn.is_none(), "unexpected ESN transform in IKE proposal");
@@ -310,13 +390,26 @@ impl Ikev2Routine {
             .ike_suite
             .get(proposal_index)
             .context("peer selected an unoffered IKE proposal number")?;
-        let selection = suite.select(suite)?;
+        let remote = CipherSuite {
+            encryption: vec![(
+                encryption.transform_id,
+                encryption.transform_key_len as u16,
+            )],
+            integrity: if encryption.is_aead {
+                Vec::new()
+            } else {
+                vec![integrity.transform_id]
+            },
+            prf: vec![prf.transform_id],
+            dh: vec![dh.transform_id],
+        };
+        let selection = suite.select(&remote)?;
         ensure!(
             Self::selection_matches_ike_transforms(
                 &selection,
                 encryption.transform_id,
-                Self::key_len_bytes_to_bits(encryption.key_len)?,
-                integrity.transform_id,
+                Self::key_len_bytes_to_bits(encryption.transform_key_len)?,
+                if encryption.is_aead { None } else { Some(integrity.transform_id) },
                 prf.transform_id,
                 dh.transform_id,
             ),
@@ -330,21 +423,56 @@ impl Ikev2Routine {
         payload: &[u8],
     ) -> Result<(u32, CipherSuiteSelection)> {
         let proposal = Self::parse_single_proposal(payload, super::common::PROTOCOL_ID_ESP, 4)?;
-        ensure!(proposal.proposal_num == 1, "unexpected CHILD_SA proposal number");
         let spi = proposal.spi.context("missing CHILD_SA SPI")?;
         let encryption = proposal.encryption.context("missing CHILD_SA encryption transform")?;
-        let integrity = proposal.integrity.context("missing CHILD_SA integrity transform")?;
+        if encryption.is_aead {
+            ensure!(
+                proposal.integrity.is_none(),
+                "unexpected integrity transform for AEAD CHILD_SA proposal"
+            );
+        }
+        let integrity = if encryption.is_aead {
+            &crate::cipher::AUTH_NONE_ALG
+        } else {
+            proposal.integrity.context("missing CHILD_SA integrity transform")?
+        };
         ensure!(proposal.prf.is_none(), "unexpected PRF transform in CHILD_SA proposal");
         ensure!(proposal.dh.is_none(), "unexpected DH transform in CHILD_SA proposal");
-        let esn = proposal.esn.context("missing CHILD_SA ESN transform")?;
+        let esn = proposal.esn.unwrap_or(ESN_ID_NO_EXT_SEQ);
         ensure!(esn == ESN_ID_NO_EXT_SEQ, "unsupported CHILD_SA ESN mode");
-        let selection = self.first_esp_selection()?;
+        let offers = self.child_sa_offer_variants()?;
+        let (suite, _) = offers
+            .get(usize::from(proposal.proposal_num).checked_sub(1).context("peer returned invalid CHILD_SA proposal number")?)
+            .context("peer selected an unoffered CHILD_SA proposal number")?;
+        let selection = CipherSuiteSelection {
+            encryption: suite
+                .encryption
+                .iter()
+                .find(|candidate| **candidate == (
+                    encryption.transform_id,
+                    encryption.transform_key_len as u16,
+                ))
+                .and_then(|candidate| ENCRYPTION_ALGS.get(candidate))
+                .context("peer selected unsupported CHILD_SA encryption transform")?,
+            integrity: if encryption.is_aead {
+                &crate::cipher::AUTH_NONE_ALG
+            } else {
+                suite
+                    .integrity
+                    .iter()
+                    .find(|candidate| **candidate == integrity.transform_id)
+                    .and_then(|candidate| INTEGRITY_ALGS.get(candidate))
+                    .context("peer selected unsupported CHILD_SA integrity transform")?
+            },
+            prf: self.selected_ike_proposal()?.prf,
+            dh: self.selected_ike_proposal()?.dh,
+        };
         ensure!(
             Self::selection_matches_child_transforms(
                 &selection,
                 encryption.transform_id,
-                Self::key_len_bytes_to_bits(encryption.key_len)?,
-                integrity.transform_id,
+                Self::key_len_bytes_to_bits(encryption.transform_key_len)?,
+                if encryption.is_aead { None } else { Some(integrity.transform_id) },
             ),
             "peer selected transforms that do not match the offered CHILD_SA proposal"
         );
@@ -476,15 +604,17 @@ impl Ikev2Routine {
         selection: &CipherSuiteSelection,
         encryption_transform_id: u16,
         encryption_key_len_bits: u16,
-        integrity_transform_id: u16,
+        integrity_transform_id: Option<u16>,
         prf_transform_id: u16,
         dh_transform_id: u16,
     ) -> bool {
         selection.encryption.transform_id == encryption_transform_id
-            && Self::key_len_bytes_to_bits(selection.encryption.key_len)
+            && Self::key_len_bytes_to_bits(selection.encryption.transform_key_len)
                 .ok()
                 .is_some_and(|bits| bits == encryption_key_len_bits)
-            && selection.integrity.transform_id == integrity_transform_id
+            && (selection.encryption.is_aead
+                || integrity_transform_id
+                    .is_some_and(|transform_id| selection.integrity.transform_id == transform_id))
             && selection.prf.transform_id == prf_transform_id
             && selection.dh.transform_id == dh_transform_id
     }
@@ -493,13 +623,15 @@ impl Ikev2Routine {
         selection: &CipherSuiteSelection,
         encryption_transform_id: u16,
         encryption_key_len_bits: u16,
-        integrity_transform_id: u16,
+        integrity_transform_id: Option<u16>,
     ) -> bool {
         selection.encryption.transform_id == encryption_transform_id
-            && Self::key_len_bytes_to_bits(selection.encryption.key_len)
+            && Self::key_len_bytes_to_bits(selection.encryption.transform_key_len)
                 .ok()
                 .is_some_and(|bits| bits == encryption_key_len_bits)
-            && selection.integrity.transform_id == integrity_transform_id
+            && (selection.encryption.is_aead
+                || integrity_transform_id
+                    .is_some_and(|transform_id| selection.integrity.transform_id == transform_id))
     }
 
     pub(super) fn decode_assigned_config(&self, cp_payload: &[u8]) -> Result<AssignedConfig> {
@@ -580,12 +712,8 @@ impl Ikev2Routine {
         Bytes::from(payload)
     }
 
-    pub(super) fn append_signature_hash_algorithms_notify(out: &mut BytesMut) {
-        let mut data = Vec::with_capacity(supported_signature_hash_algorithms().len() * 2);
-        for hash_algorithm in supported_signature_hash_algorithms() {
-            data.extend_from_slice(&hash_algorithm.to_be_bytes());
-        }
-        Self::append_notify_payload(out, NOTIFY_TYPE_SIGNATURE_HASH_ALGORITHMS, data.as_ref());
+    pub(super) const fn signature_hash_algorithms_notify() -> [u8; 6] {
+        SUPPORTED_SIGNATURE_HASH_ALGORITHMS_PAYLOAD
     }
 
     pub(super) fn decode_notify_payload(payload: &[u8]) -> Result<NotifyPayload<'_>> {
@@ -672,9 +800,9 @@ impl Ikev2Routine {
         }
         seed.extend_from_slice(&port.to_be_bytes());
         crate::debug_fmt::log_ike_bytes("natd_chunk =>", seed.as_ref());
-        let digest = hash(MessageDigest::sha1(), seed.as_ref()).context("compute NAT-D hash")?;
-        crate::debug_fmt::log_ike_bytes("natd_hash =>", digest.as_ref());
-        Ok(Bytes::copy_from_slice(digest.as_ref()))
+        let digest = Sha1::digest(&seed);
+        crate::debug_fmt::log_ike_bytes("natd_hash =>", &digest);
+        Ok(Bytes::copy_from_slice(&digest))
     }
 
     pub(super) fn nat_detected(&self, responder_spi: u64) -> Result<bool> {
@@ -697,7 +825,7 @@ impl Ikev2Routine {
     }
 
     pub(super) fn prf_plus(
-        prf: fn(&[u8], &[u8]) -> Result<Vec<u8>>,
+        prf: &crate::cipher::PrfAlg,
         key: &[u8],
         seed: &[u8],
         out_len: usize,
@@ -712,7 +840,8 @@ impl Ikev2Routine {
             }
             block.extend_from_slice(seed);
             block.put_u8(counter);
-            previous = prf(key, block.as_ref())?;
+            previous.resize(prf.output_len, 0);
+            (prf.gen_prf)(key, block.as_ref(), &mut previous)?;
             out.extend_from_slice(&previous);
             counter = counter.saturating_add(1);
         }
@@ -720,19 +849,32 @@ impl Ikev2Routine {
         Ok(out)
     }
 
-    pub(super) fn generate_spi() -> Result<u64> {
+    pub(super) fn generate_spi() -> u64 {
         let mut bytes = [0u8; 8];
-        rand_bytes(&mut bytes).context("generate initiator SPI")?;
-        Ok(u64::from_be_bytes(bytes).max(1))
+        rand_bytes(&mut bytes);
+        u64::from_be_bytes(bytes).max(1)
     }
 
-    pub(super) fn generate_nonce() -> Result<Bytes> {
+    pub(super) fn generate_nonce() -> [u8; 32] {
         let mut bytes = [0u8; 32];
-        rand_bytes(&mut bytes).context("generate nonce")?;
-        Ok(Bytes::copy_from_slice(&bytes))
+        rand_bytes(&mut bytes);
+        bytes
     }
 }
 
-fn supported_signature_hash_algorithms() -> &'static [u16] {
-    &[HASH_ALGORITHM_SHA2_256, HASH_ALGORITHM_SHA2_384, HASH_ALGORITHM_SHA2_512]
+const fn supported_signature_hash_algorithms_payload<const L: usize, const L2: usize>(
+    i: [u16; L],
+) -> [u8; L2] {
+    let mut o = [0u8; L2];
+    let mut k = 0;
+    while k < i.len() {
+        [o[2 * k], o[2 * k + 1]] = i[k].to_be_bytes();
+        k += 1;
+    }
+    o
 }
+
+const SUPPORTED_SIGNATURE_HASH_ALGORITHMS: [u16; 3] =
+    [HASH_ALGORITHM_SHA2_256, HASH_ALGORITHM_SHA2_384, HASH_ALGORITHM_SHA2_512];
+const SUPPORTED_SIGNATURE_HASH_ALGORITHMS_PAYLOAD: [u8; 6] =
+    supported_signature_hash_algorithms_payload(SUPPORTED_SIGNATURE_HASH_ALGORITHMS);

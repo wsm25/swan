@@ -12,8 +12,7 @@ use crate::{
     },
     payload::{
         IkeMessageBuilder, PAYLOAD_TYPE_AUTH, PAYLOAD_TYPE_CERT, PAYLOAD_TYPE_CP, PAYLOAD_TYPE_EAP,
-        PAYLOAD_TYPE_IDI,
-        PAYLOAD_TYPE_IDR, PAYLOAD_TYPE_NOTIFY, PAYLOAD_TYPE_SA, PAYLOAD_TYPE_TSI,
+        PAYLOAD_TYPE_IDI, PAYLOAD_TYPE_IDR, PAYLOAD_TYPE_NOTIFY, PAYLOAD_TYPE_SA, PAYLOAD_TYPE_TSI,
         PAYLOAD_TYPE_TSR, Payload,
     },
 };
@@ -148,7 +147,8 @@ impl Ikev2Routine {
             bail!("final IKE_AUTH response missing CHILD_SA proposal");
         };
 
-        let (peer_selected_spi, child_selection) = self.decode_child_sa_selection(child_sa.as_ref())?;
+        let (peer_selected_spi, child_selection) =
+            self.decode_child_sa_selection(child_sa.as_ref())?;
         let local_inbound_spi = self
             .sa
             .negotiating_child_sa
@@ -160,12 +160,8 @@ impl Ikev2Routine {
             local_inbound_spi,
             peer_selected_spi,
         )?;
-        let expected_esp = self.first_esp_selection()?;
-        ensure!(
-            child_selection.encryption.name == expected_esp.encryption.name
-                && child_selection.integrity.name == expected_esp.integrity.name,
-            "responder selected unexpected CHILD_SA proposal"
-        );
+        self.selected_child_suite = Some(child_selection.clone());
+        self.emit_negotiated_esp_algorithms()?;
 
         let assigned_config = if let Some(cp) = cp {
             self.decode_assigned_config(cp.as_ref())?
@@ -207,31 +203,35 @@ impl Ikev2Routine {
             self.sa.initiator_nonce.as_ref().context("initiator nonce missing")?;
         let responder_nonce =
             self.sa.responder_nonce.as_ref().context("responder nonce missing")?;
-        let selection = self.first_esp_selection()?;
+        let selection = self.selected_esp_proposal()?;
         let ike_prf = self.selected_ike_proposal()?.prf;
+        let integ_len = if selection.encryption.is_aead {
+            0
+        } else {
+            selection.integrity.key_len_hint
+        };
+        ensure!(selection.encryption.key_len > 0, "unsupported CHILD_SA encryption key length");
         ensure!(
-            selection.encryption.key_len > 0 && selection.integrity.key_len_hint > 0,
-            "unsupported CHILD_SA key lengths"
+            selection.encryption.is_aead || integ_len > 0,
+            "unsupported CHILD_SA integrity key length"
         );
 
         let mut seed = Vec::with_capacity(initiator_nonce.len() + responder_nonce.len());
         seed.extend_from_slice(initiator_nonce.as_ref());
         seed.extend_from_slice(responder_nonce.as_ref());
-        let out_len = 2 * (selection.encryption.key_len + selection.integrity.key_len_hint);
-        let keymat = Self::prf_plus(ike_prf.gen_prf, keys.sk_d.as_ref(), seed.as_ref(), out_len)?;
+        let out_len = 2 * (selection.encryption.key_len + integ_len);
+        let keymat = Self::prf_plus(ike_prf, keys.sk_d.as_ref(), seed.as_ref(), out_len)?;
 
         let mut offset = 0usize;
         let sk_ei =
             keymat[offset..offset + selection.encryption.key_len].to_vec().into_boxed_slice();
         offset += selection.encryption.key_len;
-        let sk_ai =
-            keymat[offset..offset + selection.integrity.key_len_hint].to_vec().into_boxed_slice();
-        offset += selection.integrity.key_len_hint;
+        let sk_ai = keymat[offset..offset + integ_len].to_vec().into_boxed_slice();
+        offset += integ_len;
         let sk_er =
             keymat[offset..offset + selection.encryption.key_len].to_vec().into_boxed_slice();
         offset += selection.encryption.key_len;
-        let sk_ar =
-            keymat[offset..offset + selection.integrity.key_len_hint].to_vec().into_boxed_slice();
+        let sk_ar = keymat[offset..offset + integ_len].to_vec().into_boxed_slice();
 
         Ok(ChildSaKeyMaterial { sk_ei, sk_ai, sk_er, sk_ar })
     }
@@ -243,26 +243,21 @@ impl Ikev2Routine {
         let mut inner = IkeMessageBuilder::new(BytesMut::with_capacity(128));
         if let Some(rightid) = self.expected_rightid() {
             let (id_type, id_value) = Self::configured_id_type_and_value(rightid);
-            let id_value = Self::encoded_id_value(id_type, id_value)?;
+            let id_value = id_value.as_bytes();
             inner.push_payload(PAYLOAD_TYPE_IDR, false, |buf| {
-                Self::append_id_payload_typed(buf, id_type, id_value.as_ref());
-                Ok(())
-            })?;
+                Self::append_id_payload_typed(buf, id_type, id_value)
+            });
         }
-        let idi_payload = self
-            .sa
-            .auth
-            .first_idi_payload
-            .clone()
-            .unwrap_or_else(|| Self::build_id_payload_typed(local.id_type, local.value.as_ref()));
+        let idi_payload =
+            self.sa.auth.first_idi_payload.clone().unwrap_or_else(|| {
+                Self::build_id_payload_typed(local.id_type, local.value.as_ref())
+            });
         inner.push_payload(PAYLOAD_TYPE_IDI, false, |buf| {
-            buf.extend_from_slice(idi_payload.as_ref());
-            Ok(())
-        })?;
+            buf.extend_from_slice(idi_payload.as_ref())
+        });
         inner.push_payload(PAYLOAD_TYPE_AUTH, false, |buf| {
-            buf.extend_from_slice(auth_payload.as_ref());
-            Ok(())
-        })?;
+            buf.extend_from_slice(auth_payload.as_ref())
+        });
         self.build_protected_request(message_id, inner)
     }
 
@@ -404,10 +399,7 @@ impl Ikev2Routine {
                 selector_length == TRAFFIC_SELECTOR_HEADER_LEN + (addr_len * 2),
                 "{payload_name} has invalid traffic selector length"
             );
-            ensure!(
-                rest.len() >= selector_length,
-                "{payload_name} selector overruns payload"
-            );
+            ensure!(rest.len() >= selector_length, "{payload_name} selector overruns payload");
             let selector = &rest[..selector_length];
             let addresses = &selector[TRAFFIC_SELECTOR_HEADER_LEN..];
             let start_addr = addresses[..addr_len].to_vec().into_boxed_slice();

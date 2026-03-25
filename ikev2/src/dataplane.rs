@@ -3,13 +3,13 @@ use bytemuck::{Pod, Zeroable, pod_read_unaligned};
 use bytes::{Bytes, BytesMut};
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt, SinkExt, Stream, StreamExt, select};
-use openssl::rand::rand_bytes;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::{ChildSaInstall, ChildSaKeyMaterial};
+use crate::cipher::rand_bytes;
 use crate::{
     EventHub, Ikev2Event, IpPacket, UdpConn, UdpPacket,
     config::CipherSuiteSelection,
@@ -93,8 +93,7 @@ impl DataPlaneContext {
             "run",
             &format!(
                 "child-sa active inbound_spi=0x{:08x} outbound_spi=0x{:08x}",
-                init.child_sa.inbound_spi,
-                init.child_sa.outbound_spi
+                init.child_sa.inbound_spi, init.child_sa.outbound_spi
             ),
         );
         crate::debug_fmt::log_child_sa_runtime(&init.child_sa, &init.keys, &init.selection);
@@ -206,10 +205,8 @@ impl DataPlaneContext {
     async fn handle_inbound_packet(&mut self, packet: UdpPacket) -> Result<InboundControlOutcome> {
         match self.routine.process_inbound_udp_packet(packet)? {
             InboundUdpPacket::Ike { packet } => {
-                let outcome = self
-                    .routine
-                    .handle_running_control_packet(&mut *self.udp_conn, packet)
-                    .await?;
+                let outcome =
+                    self.routine.handle_running_control_packet(&mut *self.udp_conn, packet).await?;
                 self.last_control_activity = Instant::now();
                 Ok(outcome)
             }
@@ -235,17 +232,13 @@ impl DataPlaneContext {
         let header = pod_read_unaligned::<EspHeader>(&packet[..std::mem::size_of::<EspHeader>()]);
         let spi = header.spi.to_native();
         if spi != self.child_sa.inbound_spi {
-            let direction_hint = if spi == self.child_sa.outbound_spi {
-                " matched local outbound SPI"
-            } else {
-                ""
-            };
+            let direction_hint =
+                if spi == self.child_sa.outbound_spi { " matched local outbound SPI" } else { "" };
             crate::debug_fmt::log_udp(
                 "recv",
                 &format!(
                     "dropping ESP packet with unknown SPI=0x{spi:08x}; expected inbound_spi=0x{:08x} outbound_spi=0x{:08x}{direction_hint}",
-                    self.child_sa.inbound_spi,
-                    self.child_sa.outbound_spi,
+                    self.child_sa.inbound_spi, self.child_sa.outbound_spi,
                 ),
             );
             return Ok(());
@@ -255,7 +248,7 @@ impl DataPlaneContext {
         let enc = self.selection.encryption;
         let integ = self.selection.integrity;
         let iv_len = enc.iv_len;
-        let icv_len = integ.output_len;
+        let icv_len = if enc.is_aead { enc.icv_len } else { integ.output_len };
         let body = &packet[std::mem::size_of::<EspHeader>()..];
         if body.len() < iv_len + icv_len {
             crate::debug_fmt::log_udp("recv", "dropping ESP packet that is too short");
@@ -274,29 +267,50 @@ impl DataPlaneContext {
             ),
         );
         let (iv, rest) = body.split_at(iv_len);
-        let (ciphertext, recv_icv) = rest.split_at(rest.len() - icv_len);
-        let expected_icv =
-            (integ.sign)(self.keys.sk_ar.as_ref(), &packet[..packet.len() - icv_len])?;
-        if expected_icv.len() < icv_len || expected_icv[..icv_len] != recv_icv[..] {
-            crate::debug_fmt::log_udp("recv", "dropping ESP packet with invalid integrity check");
-            return Ok(());
-        }
-        let plaintext = match (enc.decrypt)(self.keys.sk_er.as_ref(), iv, ciphertext) {
-            Ok(plaintext) => plaintext,
-            Err(_) => {
-                crate::debug_fmt::log_udp("recv", "dropping ESP packet that failed decryption");
+        let plaintext = if enc.is_aead {
+            match enc.decrypt_vec(
+                self.keys.sk_er.as_ref(),
+                iv,
+                &packet[..std::mem::size_of::<EspHeader>()],
+                rest,
+            ) {
+                Ok(plaintext) => plaintext,
+                Err(_) => {
+                    crate::debug_fmt::log_udp(
+                        "recv",
+                        "dropping ESP packet that failed AEAD verification",
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            let (ciphertext, recv_icv) = rest.split_at(rest.len() - icv_len);
+            let expected_icv =
+                integ.sign_vec(self.keys.sk_ar.as_ref(), &packet[..packet.len() - icv_len])?;
+            if expected_icv.len() < icv_len || expected_icv[..icv_len] != recv_icv[..] {
+                crate::debug_fmt::log_udp(
+                    "recv",
+                    "dropping ESP packet with invalid integrity check",
+                );
                 return Ok(());
+            }
+            match enc.decrypt_vec(self.keys.sk_er.as_ref(), iv, &[], ciphertext) {
+                Ok(plaintext) => plaintext,
+                Err(_) => {
+                    crate::debug_fmt::log_udp("recv", "dropping ESP packet that failed decryption");
+                    return Ok(());
+                }
             }
         };
         if plaintext.is_empty() {
             crate::debug_fmt::log_udp("recv", "dropping empty ESP plaintext");
             return Ok(());
         }
-        let Some(&pad_len_byte) = plaintext.last() else {
-            crate::debug_fmt::log_udp("recv", "dropping ESP packet missing pad length");
+        if plaintext.len() < 2 {
+            crate::debug_fmt::log_udp("recv", "dropping ESP packet missing trailer");
             return Ok(());
-        };
-        let pad_len = pad_len_byte as usize;
+        }
+        let pad_len = plaintext[plaintext.len() - 2] as usize;
         if plaintext.len() <= pad_len + 1 {
             crate::debug_fmt::log_udp("recv", "dropping ESP packet with invalid padding");
             return Ok(());
@@ -339,27 +353,30 @@ impl DataPlaneContext {
         plaintext.extend_from_slice(&[pad_len as u8, next_header]);
 
         let mut iv = vec![0u8; enc.iv_len];
-        rand_bytes(&mut iv).context("generate ESP IV")?;
-        let ciphertext = (enc.encrypt)(self.keys.sk_ei.as_ref(), &iv, plaintext.as_ref())?;
+        rand_bytes(&mut iv);
 
         let seq = self.esp.outbound_seq;
         ensure!(seq != 0, "ESP outbound sequence number wrapped");
         self.esp.outbound_seq = self.esp.outbound_seq.wrapping_add(1);
 
-        let mut out = BytesMut::with_capacity(
-            std::mem::size_of::<EspHeader>() + iv.len() + ciphertext.len() + integ.output_len,
-        );
+        let mut out = BytesMut::with_capacity(std::mem::size_of::<EspHeader>() + iv.len() + plaintext.len() + if enc.is_aead { enc.icv_len } else { integ.output_len });
         out.extend_from_slice(bytemuck::bytes_of(&EspHeader {
             spi: self.child_sa.outbound_spi.into(),
             sequence_number: seq.into(),
         }));
+        let ciphertext = if enc.is_aead {
+            enc.encrypt_vec(self.keys.sk_ei.as_ref(), &iv, out.as_ref(), plaintext.as_ref())?
+        } else {
+            enc.encrypt_vec(self.keys.sk_ei.as_ref(), &iv, &[], plaintext.as_ref())?
+        };
         out.extend_from_slice(&iv);
         out.extend_from_slice(&ciphertext);
-        out.resize(out.len() + integ.output_len, 0);
-        let icv_start = out.len() - integ.output_len;
-        let icv = (integ.sign)(self.keys.sk_ai.as_ref(), &out[..icv_start])?;
-        ensure!(icv.len() >= integ.output_len, "ESP integrity output too short");
-        out[icv_start..].copy_from_slice(&icv[..integ.output_len]);
+        if !enc.is_aead {
+            out.resize(out.len() + integ.output_len, 0);
+            let icv_start = out.len() - integ.output_len;
+            let (data, icv) = out.split_at_mut(icv_start);
+            (integ.sign)(self.keys.sk_ai.as_ref(), data, icv)?;
+        }
         let dst = self
             .routine
             .transport
@@ -378,7 +395,10 @@ struct ClosedUdpConn;
 impl Stream for ClosedUdpConn {
     type Item = UdpPacket;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
         std::task::Poll::Ready(None)
     }
 }
