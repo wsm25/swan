@@ -1,0 +1,17 @@
+# ---- tests ----
+/tests/client/swan4-tests
+/tests/docker/certs/
+
+*.test
+*.out
+coverage.*
+*.prof
+.vscode/
+.idea/
+.pi/
+.codex/
+*.swp
+*~
+.DS_Store
+*.log
+*.tmp

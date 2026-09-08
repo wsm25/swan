@@ -1,0 +1,5 @@
+# EAP test user, plaintext password (the mschap module derives the NT hash
+# internally; no samba/ntlm_auth required on FreeRADIUS 3.2).
+testuser Cleartext-Password := "testpassword"
+
+DEFAULT Auth-Type := Local

@@ -1,0 +1,10 @@
+# Native MSCHAPv2 verification (no external ntlm_auth). FreeRADIUS derives
+# the challenge response and MPPE keys from Cleartext-Password.
+mschap {
+	use_mppe = yes
+	require_encryption = yes
+	require_strong = yes
+	with_ntdomain_hack = no
+	allow_retry = yes
+	winbind_retry_with_normalised_username = no
+}

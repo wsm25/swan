@@ -1,0 +1,29 @@
+eap {
+	default_eap_type = peap
+	timer_expire = 60
+	ignore_unknown_eap_types = no
+	cisco_accounting_username_bug = no
+	max_sessions = ${max_requests}
+
+	tls-config tls-common {
+		private_key_file = /etc/freeradius/3.0/certs/serverKey.pem
+		certificate_file = /etc/freeradius/3.0/certs/serverCert.pem
+		ca_file = /etc/freeradius/3.0/certs/caCert.pem
+
+		random_file = /dev/urandom
+		fragment_size = 1024
+		include_length = yes
+		check_cert_cn = %{User-Name}
+	}
+
+	peap {
+		default_eap_type = mschapv2
+		copy_request_to_tunnel = no
+		use_tunneled_reply = no
+		virtual_server = "inner-tunnel"
+		tls = tls-common
+	}
+
+	mschapv2 {
+	}
+}
