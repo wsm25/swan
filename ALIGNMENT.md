@@ -274,8 +274,9 @@ Current behavior:
 - DELETE ESP (exactly one 4-byte SPI) must equal `ActiveChild.OutboundSPI`:
   the child is cleared, `childClosed` is closed, and the ESP pipeline ends
   the tunnel surface while IKE keeps running. Unknown SPIs are dropped.
-- CREATE_CHILD_SA is refused with `NO_ADDITIONAL_SAS` as a protected
-  response; the existing SA keeps running.
+- CREATE_CHILD_SA rekeys (CHILD and IKE, peer-initiated) are accepted;
+  simultaneous child rekey (theirs in flight while ours is) receives
+  `TEMPORARY_FAILURE` and the peer retries.
 - every packet is released exactly once.
 
 4.5 close:
@@ -410,8 +411,9 @@ Current behavior:
   `IKEV2_MESSAGE_ID_SYNC` notify is an error.
 - `ClearSession` wipes keys, nonces, checkpoints, history, fragments,
   assigned config, child state, and EAP MSK on both failure and close.
-- `AddressExpirySeconds` is parsed from CP attribute 5 but no lease renewal
-  is implemented.
+- `AddressExpirySeconds` is parsed from CP attribute 5; at 80% of the lease
+  the running actor renews via INFORMATIONAL + CFG_REQUEST, retries on
+  failure, and treats hard expiry as a session failure.
 - The running actor rejects cleartext INFORMATIONALs and enforces request
   message-id ordering with the 4-entry response replay cache.
 
@@ -428,6 +430,28 @@ Current behavior:
 - Pooling: transport rx buffers start at 4 KiB, ESP inbound plaintext at
   2 KiB, ESP outbound datagrams at 4 KiB; larger packets allocate and
   recycle their larger backings.
+
+## Rekey support (implemented)
+
+- Initiator CHILD_SA rekey: CREATE_CHILD_SA with ESP SA + Nr [+KEi if PFS]
+  + TSi/TSr; the new SA is installed atomically (old inbound still
+  decrypts), outbound switches to the new SPI, then the old CHILD_SA is
+  DELETE-ed. Triggers: soft lifetime, outbound byte/packet thresholds, and
+  a near-sequence-wrap emergency threshold.
+- Initiator IKE_SA rekey: CREATE_CHILD_SA with IKE SA + Nr + KEi, fresh
+  SKEYSEED/keymat from the new nonces/DH, SPI/SK swap, message-id reset to
+  0 on the new IKE SA, old context retained until the old IKE SA delete
+  acknowledges.
+- Peer-initiated rekey is accepted for both families; a peer-initiated IKE
+  rekey flips `IsOriginalInitiator` so header flags and outbound/inbound
+  key halves follow the new role. REKEY_SA target SPI accepts both the old
+  inbound and old outbound spelling because real strongSwan sends its
+  inbound SPI on the wire.
+- Config surface: `swan.Config.Rekey` with IKE/Child `Lifetime{Time,Bytes,
+  Packets}`, `ChildPFS`, `RandTime`, `RetryInterval`, `NearWrapThreshold`.
+  Defaults: IKE 4h / CHILD 1h soft, PFS on, 90% near-wrap, 30s retry.
+  IKE Bytes/Packets are parsed but not enforced (time-driven only).
+- Lease renewal per the long-run note above.
 
 ## Local test fixtures
 

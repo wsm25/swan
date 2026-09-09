@@ -97,7 +97,7 @@ func (c *Control) Close(ctx context.Context, tx chan<- *transport.Frame) (CloseO
 	if c.state.ActiveChild != nil {
 		msgID := c.state.NextRequestMessageID
 		c.state.NextRequestMessageID++
-		packets, err := c.buildChildDelete(msgID, c.state.ActiveChild.OutboundSPI)
+		packets, err := c.buildChildDelete(msgID, c.state.ActiveChild.InboundSPI)
 		if err != nil {
 			return CloseAlreadyClosed, err
 		}
@@ -138,7 +138,7 @@ func (c *Control) CloseExchange(ctx context.Context, in <-chan *transport.Packet
 
 	if c.state.ActiveChild != nil {
 		msgID := h.beginRequest()
-		packets, err := c.buildChildDelete(msgID, c.state.ActiveChild.OutboundSPI)
+		packets, err := c.buildChildDelete(msgID, c.state.ActiveChild.InboundSPI)
 		if err != nil {
 			return CloseAlreadyClosed, err
 		}

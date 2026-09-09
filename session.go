@@ -51,6 +51,11 @@ type Session struct {
 	pktIn    chan []byte
 	pktOut   chan []esp.InboundPacket
 
+	// control -> Session data-plane/lease updates and the data-plane
+	// near-wrap emergency rekey trigger.
+	dataUpdates chan control.DataplaneUpdate
+	nearWrap    chan struct{}
+
 	// Layer actors. rx/tx are created per Start; control and hub are
 	// created in NewSession.
 	rx     *transport.RxWorker
@@ -132,21 +137,25 @@ func NewSession(wire io.ReadWriteCloser, cfg *Config, opts ...Option) (*Session,
 
 	hub := events.NewHub(c.Queue.Events, events.DefaultReplayHistory)
 	s := &Session{
-		wire:     wire,
-		cfg:      c,
-		opts:     o,
-		idi:      idi,
-		rightID:  rightID,
-		events:   hub,
-		ctlIn:    make(chan *transport.Packet, c.Queue.Ctl),
-		espIn:    make(chan []*transport.Packet, c.Queue.Esp),
-		txFrames: make(chan *transport.Frame, c.Queue.Data),
-		pktIn:    make(chan []byte, c.Queue.Data),
-		pktOut:   make(chan []esp.InboundPacket, c.Queue.Data),
-		done:     make(chan struct{}),
+		wire:        wire,
+		cfg:         c,
+		opts:        o,
+		idi:         idi,
+		rightID:     rightID,
+		events:      hub,
+		ctlIn:       make(chan *transport.Packet, c.Queue.Ctl),
+		espIn:       make(chan []*transport.Packet, c.Queue.Esp),
+		txFrames:    make(chan *transport.Frame, c.Queue.Data),
+		pktIn:       make(chan []byte, c.Queue.Data),
+		pktOut:      make(chan []esp.InboundPacket, c.Queue.Data),
+		dataUpdates: make(chan control.DataplaneUpdate, 16),
+		nearWrap:    make(chan struct{}, 1),
+		done:        make(chan struct{}),
 	}
 
 	ctrlCfg := s.controlConfig()
+	ctrlCfg.DataUpdates = s.dataUpdates
+	ctrlCfg.NearWrap = s.nearWrap
 	s.ctrl, err = control.New(ctrlCfg, hub)
 	if err != nil {
 		return nil, err
@@ -182,6 +191,22 @@ func (s *Session) controlConfig() *control.Config {
 			SkfReassemblyTimeout: c.Timeouts.SkfReassemblyTimeout,
 		},
 		FragmentPlaintextLimit: 1024,
+		Rekey: control.RekeyConfig{
+			IKE: control.Lifetime{
+				Time:    c.Rekey.IKE.Time,
+				Bytes:   c.Rekey.IKE.Bytes,
+				Packets: c.Rekey.IKE.Packets,
+			},
+			Child: control.Lifetime{
+				Time:    c.Rekey.Child.Time,
+				Bytes:   c.Rekey.Child.Bytes,
+				Packets: c.Rekey.Child.Packets,
+			},
+			ChildPFS:          c.Rekey.ChildPFS,
+			RandTime:          c.Rekey.RandTime,
+			RetryInterval:     c.Rekey.RetryInterval,
+			NearWrapThreshold: c.Rekey.NearWrapThreshold,
+		},
 	}
 }
 
@@ -273,17 +298,9 @@ func (s *Session) Start(ctx context.Context) (*Tunnel, error) {
 	}
 
 	espFatal := make(chan error, 1)
-	inbound := esp.NewInbound(esp.InboundConfig{
-		SPI:       est.Child.InboundSPI,
-		Selection: est.Selection,
-		Keys:      est.ChildKeys,
-	})
-	outbound := esp.NewOutbound(esp.OutboundConfig{
-		SPI:       est.Child.OutboundSPI,
-		Selection: est.Selection,
-		Keys:      est.ChildKeys,
-	})
-	pipeline := esp.NewPipeline(inbound, outbound, s.espIn, s.pktIn, s.pktOut, s.txFrames, est.ChildClosed, espFatal)
+	inbound := esp.NewInbound(childInboundConfig(est.Child, est.Selection, est.ChildKeys))
+	outbound := esp.NewOutbound(childOutboundConfig(s.cfg, est.Child, est.Selection, est.ChildKeys, s.nearWrap))
+	pipeline := esp.NewPipeline(inbound, outbound, s.espIn, s.pktIn, s.pktOut, s.txFrames, nil, espFatal)
 	t := &Tunnel{
 		inbound:  s.pktOut,
 		outbound: s.pktIn,
@@ -313,12 +330,101 @@ func (s *Session) Start(ctx context.Context) (*Tunnel, error) {
 	go pipeline.Run(runCtx)
 	go s.watchRunning(est.Terminated, runningDone)
 	go s.watchDataFatal(espFatal)
-	// A peer CHILD_SA delete ends the tunnel surface (Read returns EOF,
-	// Write returns ErrClosedPipe) while the IKE SA keeps its keepalive
-	// cadence.
-	go s.watchChildClosed(est.ChildClosed, t)
+	go s.watchControlUpdates(t, pipeline)
 
 	return t, nil
+}
+
+// childInboundConfig chooses the responder-side key halves for an ESP child
+// inbound codec. The initial child and locally-initiated rekeys use SKer/SKar
+// inbound; peer-initiated children swap to SKei/SKai.
+func childInboundConfig(child control.ChildSA, sel *xcrypto.Selection, keys *xcrypto.ChildKeys) esp.InboundConfig {
+	cfg := esp.InboundConfig{SPI: child.InboundSPI, Selection: sel, Keys: keys}
+	if child.LocalChildInitiator {
+		cfg.Keys = &xcrypto.ChildKeys{SKei: keys.SKei, SKai: keys.SKai, SKer: keys.SKer, SKar: keys.SKar}
+	} else {
+		cfg.Keys = &xcrypto.ChildKeys{SKei: keys.SKer, SKai: keys.SKar, SKer: keys.SKei, SKar: keys.SKai}
+	}
+	return cfg
+}
+
+// childOutboundConfig chooses the outbound key halves and flow-trigger
+// settings for an ESP child outbound codec.
+func childOutboundConfig(c Config, child control.ChildSA, sel *xcrypto.Selection, keys *xcrypto.ChildKeys, nearWrap chan struct{}) esp.OutboundConfig {
+	cfg := esp.OutboundConfig{SPI: child.OutboundSPI, Selection: sel, FlowWarn: nearWrap}
+	if child.LocalChildInitiator {
+		cfg.Keys = &xcrypto.ChildKeys{SKei: keys.SKei, SKai: keys.SKai, SKer: keys.SKer, SKar: keys.SKar}
+	} else {
+		cfg.Keys = &xcrypto.ChildKeys{SKei: keys.SKer, SKai: keys.SKar, SKer: keys.SKei, SKar: keys.SKai}
+	}
+	threshold := c.Rekey.NearWrapThreshold
+	if threshold <= 0 {
+		threshold = 0.9
+	}
+	cfg.WarnAt = uint32(float64(^uint32(0)) * threshold)
+	if cfg.WarnAt == 0 {
+		cfg.WarnAt = 1
+	}
+	cfg.FlowLimit = esp.FlowLimit{Bytes: c.Rekey.Child.Bytes, Packets: c.Rekey.Child.Packets}
+	return cfg
+}
+
+// watchControlUpdates applies control-plane rekey/lease updates to the
+// data-plane pipeline and public Tunnel surface.
+func (s *Session) watchControlUpdates(t *Tunnel, pipeline *esp.Pipeline) {
+	for {
+		select {
+		case <-s.done:
+			return
+		case u := <-s.dataUpdates:
+			switch u.Kind {
+			case control.UpdateChildInstalled:
+				oldInboundSPI := s.currentChildInboundSPI()
+				inbound := esp.NewInbound(childInboundConfig(u.Child, u.Selection, u.Keys))
+				outbound := esp.NewOutbound(childOutboundConfig(s.cfg, u.Child, u.Selection, u.Keys, s.nearWrap))
+				pipeline.ReplaceChild(inbound, outbound, oldInboundSPI)
+				s.setCurrentChild(u.Child)
+				if u.Ack != nil {
+					u.Ack <- struct{}{}
+				}
+			case control.UpdateChildDeleted:
+				current := s.currentChild()
+				if t != nil && current.OutboundSPI == u.Child.OutboundSPI {
+					t.markEnded()
+				} else {
+					pipeline.DropInboundSPI(u.Child.InboundSPI)
+				}
+			case control.UpdateAssigned:
+				if t != nil {
+					s.mu.Lock()
+					t.assigned = u.Assigned
+					s.mu.Unlock()
+					s.emit(events.Event{Kind: events.EventConfigAssigned, Assigned: u.Assigned})
+				}
+			}
+		}
+	}
+}
+
+func (s *Session) currentChild() control.ChildSA {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tunnel == nil {
+		return control.ChildSA{}
+	}
+	return s.tunnel.childSA
+}
+
+func (s *Session) currentChildInboundSPI() uint32 {
+	return s.currentChild().InboundSPI
+}
+
+func (s *Session) setCurrentChild(child control.ChildSA) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tunnel != nil {
+		s.tunnel.childSA = child
+	}
 }
 
 // watchDataFatal converts the data plane's fatal error (e.g. ESP sequence

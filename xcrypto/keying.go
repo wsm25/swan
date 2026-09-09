@@ -48,6 +48,16 @@ func SKEYSEED(prf *PRF, Ni, Nr, sharedSecret []byte) ([]byte, error) {
 	return prf.Sum(key, sharedSecret)
 }
 
+// RekeySKEYSEED derives prf(SK_d(old), g^ir(new) | Ni | Nr) per RFC 7296
+// 2.18. The PRF is the old IKE SA's PRF; SK_d is its key.
+func RekeySKEYSEED(prf *PRF, skdOld, sharedSecret, Ni, Nr []byte) ([]byte, error) {
+	data := make([]byte, 0, len(sharedSecret)+len(Ni)+len(Nr))
+	data = append(data, sharedSecret...)
+	data = append(data, Ni...)
+	data = append(data, Nr...)
+	return prf.Sum(skdOld, data)
+}
+
 // DeriveIKEKeys expands SKEYSEED into the seven IKE keys with the lengths
 // implied by the selected encryption and integrity transforms.
 func DeriveIKEKeys(prf *PRF, skeyseed, Ni, Nr []byte, spiI, spiR uint64, enc *EncryptionAlg, integ *Integrity) (*IKEKeys, error) {
@@ -87,9 +97,12 @@ func DeriveIKEKeys(prf *PRF, skeyseed, Ni, Nr []byte, spiI, spiR uint64, enc *En
 	}, nil
 }
 
-// DeriveChildKeys expands SKd into the four CHILD_SA keys.
-func DeriveChildKeys(prf *PRF, skd, Ni, Nr []byte, enc *EncryptionAlg, integ *Integrity) (*ChildKeys, error) {
-	seed := make([]byte, 0, len(Ni)+len(Nr))
+// DeriveChildKeys expands SKd into the four CHILD_SA keys. When
+// sharedSecret is nil the seed is Ni | Nr (RFC 7296 2.17 base case); when
+// non-nil it is sharedSecret | Ni | Nr (RFC 7296 2.17 PFS case).
+func DeriveChildKeys(prf *PRF, skd, Ni, Nr, sharedSecret []byte, enc *EncryptionAlg, integ *Integrity) (*ChildKeys, error) {
+	seed := make([]byte, 0, len(sharedSecret)+len(Ni)+len(Nr))
+	seed = append(seed, sharedSecret...)
 	seed = append(seed, Ni...)
 	seed = append(seed, Nr...)
 

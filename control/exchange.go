@@ -180,7 +180,7 @@ func (h *Handshake) classifyResponse(hdr wire.Header, msgID uint32) (Disposition
 	if h.state.ResponderSPI != 0 && hdr.ResponderSPI.Uint64() != h.state.ResponderSPI {
 		return DispositionIgnore, nil
 	}
-	if err := validateResponseEnvelope(hdr); err != nil {
+	if err := validateResponseEnvelopeForRole(hdr, h.state.IsOriginalInitiator); err != nil {
 		return DispositionIgnore, err
 	}
 
@@ -200,7 +200,7 @@ func (h *Handshake) classifyResponse(hdr wire.Header, msgID uint32) (Disposition
 // validateResponseHeader checks version/flags/SPIs/exchange/message-id
 // per RFC 7296 and the MVP responder profile.
 func (h *Handshake) validateResponseHeader(hdr wire.Header, exchange wire.ExchangeType, msgID uint32) error {
-	if err := validateResponseEnvelope(hdr); err != nil {
+	if err := validateResponseEnvelopeForRole(hdr, h.state.IsOriginalInitiator); err != nil {
 		return err
 	}
 	if hdr.InitiatorSPI.Uint64() != h.state.InitiatorSPI {
@@ -230,21 +230,29 @@ func (h *Handshake) validateResponseHeader(hdr wire.Header, exchange wire.Exchan
 	return nil
 }
 
-// validateResponseEnvelope checks the response flag/version invariant shared
-// by every response, independent of the exchange step.
+// validateResponseEnvelope is validateResponseEnvelopeForRole for the
+// initiator-only handshake path (the only path that uses the Handshake
+// exchange helpers).
 func validateResponseEnvelope(hdr wire.Header) error {
+	return validateResponseEnvelopeForRole(hdr, true)
+}
+
+// validateResponseEnvelopeForRole checks the response flag/version
+// invariant for a given original-initator role. When the peer is the
+// original initiator of the current IKE SA, its responses legitimately set
+// FlagInitiator as well as FlagResponse (RFC 7296 2.8.2).
+func validateResponseEnvelopeForRole(hdr wire.Header, localOriginalInitiator bool) error {
 	if hdr.Version != wire.IKEDefaultVersion {
 		return fmt.Errorf("control: unexpected IKE version 0x%02x", hdr.Version)
 	}
-	// swan2 IkeFlags knows RESPONSE, VERSION and INITIATOR; VERSION may
-	// legitimately appear (it is part of the defined flags mask) and is not
-	// treated as reserved by validate_response_envelope.
 	const mask = wire.FlagResponse | wire.FlagVersion | wire.FlagInitiator
 	if hdr.Flags&wire.FlagResponse == 0 {
 		return fmt.Errorf("control: expected response flag in inbound message")
 	}
-	if hdr.Flags&wire.FlagInitiator != 0 {
-		return fmt.Errorf("control: unexpected initiator flag in response")
+	hasInitiator := hdr.Flags&wire.FlagInitiator != 0
+	wantInitiator := !localOriginalInitiator
+	if hasInitiator != wantInitiator {
+		return fmt.Errorf("control: unexpected initiator flag in response (have=%t want=%t)", hasInitiator, wantInitiator)
 	}
 	if hdr.Flags&^mask != 0 {
 		return fmt.Errorf("control: unexpected reserved flag bits 0x%02x", uint8(hdr.Flags)&^mask)

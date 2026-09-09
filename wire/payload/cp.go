@@ -2,6 +2,7 @@ package payload
 
 import (
 	"fmt"
+	"net"
 
 	"swan/wire"
 )
@@ -76,6 +77,35 @@ func AppendConfigRequest(dst []byte) []byte {
 	} {
 		cp.Attributes = append(cp.Attributes, ConfigAttribute{Type: typ})
 	}
+	return AppendConfigPayload(dst, cp)
+}
+
+// ConfigRenewRequest is the caller-level suggested-address bundle for an
+// INFORMATIONAL CP(CFG_REQUEST) lease renewal.
+type ConfigRenewRequest struct {
+	InternalIPv4       net.IP
+	InternalIPv6       net.IP
+	InternalIPv6Prefix uint8
+}
+
+// AppendConfigRenewRequest builds the CFG_REQUEST body for lease renewal:
+// it carries the current assigned addresses as non-empty RFC 7296 3.15
+// suggestions and re-requests DNS attributes.
+func AppendConfigRenewRequest(dst []byte, req ConfigRenewRequest) []byte {
+	cp := ConfigPayload{}
+	attrs := make([]ConfigAttribute, 0, 4)
+	if v4 := req.InternalIPv4.To4(); v4 != nil {
+		attrs = append(attrs, ConfigAttribute{Type: wire.ConfigAttrInternalIPv4Address, Value: append([]byte(nil), v4...)})
+	}
+	attrs = append(attrs, ConfigAttribute{Type: wire.ConfigAttrInternalIPv4DNS})
+	if v6 := req.InternalIPv6.To16(); v6 != nil {
+		value := make([]byte, 17)
+		copy(value, v6)
+		value[16] = req.InternalIPv6Prefix
+		attrs = append(attrs, ConfigAttribute{Type: wire.ConfigAttrInternalIPv6Address, Value: value})
+	}
+	attrs = append(attrs, ConfigAttribute{Type: wire.ConfigAttrInternalIPv6DNS})
+	cp.Attributes = attrs
 	return AppendConfigPayload(dst, cp)
 }
 

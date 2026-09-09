@@ -94,6 +94,8 @@ const (
 	NotifySinglePairRequired            NotifyType = 34
 	NotifyNoAdditionalSAs               NotifyType = 35
 	NotifyInternalAddressFailure        NotifyType = 36
+	NotifyTemporaryFailure              NotifyType = 43
+	NotifyChildSANotFound               NotifyType = 44
 	NotifyFailedCPRequired              NotifyType = 37
 	NotifyTSUnacceptable                NotifyType = 38
 	NotifyInvalidSelectors              NotifyType = 39
@@ -114,6 +116,7 @@ const (
 	NotifyIKEv2MessageIDSync            NotifyType = 16422
 	NotifyFragmentationSupported        NotifyType = 16430
 	NotifySignatureHashAlgorithms       NotifyType = 16431
+	NotifyRekeySA                       NotifyType = 16393
 	NotifyIntermediateExchangeSupported NotifyType = 16438
 )
 

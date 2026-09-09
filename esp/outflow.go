@@ -16,6 +16,13 @@ import (
 // Outbound.
 var ErrSeqWrapped = errors.New("swan/esp: ESP sequence number wrapped after 2^32-1 packets")
 
+// FlowLimit is the outbound byte/packet rekey trigger. Zero disables a
+// limit. Counters are outbound-only per the accepted design.
+type FlowLimit struct {
+	Bytes   uint64
+	Packets uint64
+}
+
 // OutboundConfig freezes the per-SA read-only state handed to the outbound
 // worker at establishment.
 type OutboundConfig struct {
@@ -23,6 +30,15 @@ type OutboundConfig struct {
 	SPI       uint32
 	Selection *xcrypto.Selection
 	Keys      *xcrypto.ChildKeys
+
+	// WarnAt is the precomputed ESP sequence number at or above which the
+	// worker raises a non-blocking emergency rekey trigger (0 disables).
+	WarnAt uint32
+	// FlowWarn receives the non-blocking emergency/limit trigger. The send
+	// never blocks the hot path.
+	FlowWarn chan<- struct{}
+	// FlowLimit sets outbound byte/packet rekey thresholds.
+	FlowLimit FlowLimit
 }
 
 // outboundPoolBufSize is the initial ESP datagram backing class size. Larger
@@ -44,6 +60,9 @@ type Outbound struct {
 
 	seq      uint32
 	wrapped  bool
+	packets  uint64
+	bytesOut uint64
+	warned   bool
 	enc      *xcrypto.PreparedEncryption
 	integ    *xcrypto.PreparedIntegrity
 	stateErr error
@@ -132,6 +151,9 @@ func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
 	}
 	seq := p.seq
 	p.seq++
+	p.packets++
+	p.bytesOut += uint64(len(packet))
+	p.checkFlowTriggers()
 
 	// The transport length prefix is 16-bit; reject frames that could not
 	// be written before allocating/sealing. A silent oversized write would
@@ -186,6 +208,25 @@ func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
 
 // allocDatagram carves an ESP datagram out of the outbound pool and returns
 // the release hook that puts its whole backing array back.
+// checkFlowTriggers raises at most one non-blocking rekey trigger per SA
+// for sequence near-wrap or byte/packet flow limits.
+func (p *Outbound) checkFlowTriggers() {
+	if p.warned || p.cfg.FlowWarn == nil {
+		return
+	}
+	limitHit := p.cfg.FlowLimit.Bytes > 0 && p.bytesOut >= p.cfg.FlowLimit.Bytes
+	limitHit = limitHit || (p.cfg.FlowLimit.Packets > 0 && p.packets >= p.cfg.FlowLimit.Packets)
+	seqHit := p.cfg.WarnAt > 0 && p.seq >= p.cfg.WarnAt
+	if !limitHit && !seqHit {
+		return
+	}
+	p.warned = true
+	select {
+	case p.cfg.FlowWarn <- struct{}{}:
+	default:
+	}
+}
+
 func (p *Outbound) allocDatagram(n int) ([]byte, func()) {
 	ob := p.pool.Get().(*outboundDatagram)
 	if cap(ob.b) < n {

@@ -202,10 +202,11 @@ func (h *Handshake) processFinalAuth(m *wire.Message) (*ChildSA, error) {
 
 	h.state.Assigned = assigned
 	child := &ChildSA{
-		InboundSPI:  localInbound,
-		OutboundSPI: peerSPI,
-		TSi:         append([]byte(nil), tsiBody...),
-		TSr:         append([]byte(nil), tsrBody...),
+		InboundSPI:          localInbound,
+		OutboundSPI:         peerSPI,
+		TSi:                 append([]byte(nil), tsiBody...),
+		TSr:                 append([]byte(nil), tsrBody...),
+		LocalChildInitiator: true,
 	}
 	h.state.NegotiatingChild = nil
 	h.state.ActiveChild = child
@@ -244,16 +245,25 @@ func (h *Handshake) decodeChildSelection(sa payload.SA) (uint32, *xcrypto.Select
 	var integID uint16
 	var hasInteg bool
 	esn := -1
-	var chosenTR *payload.Transform
+	dhID := uint16(0)
+	var selectedTR *payload.Transform
 
 	for i := range prop.Transforms {
 		tr := &prop.Transforms[i]
 		switch tr.Type {
+		case wire.TransformDH:
+			if len(tr.Attrs) != 0 {
+				return 0, nil, fmt.Errorf("control: unexpected DH attributes in CHILD_SA selection")
+			}
+			if dhID != 0 {
+				return 0, nil, fmt.Errorf("control: multiple DH transforms in CHILD_SA selection")
+			}
+			dhID = tr.ID
 		case wire.TransformENC:
-			if chosenTR != nil {
+			if selectedTR != nil {
 				return 0, nil, fmt.Errorf("control: multiple ENCR transforms in CHILD_SA selection")
 			}
-			chosenTR = tr
+			selectedTR = tr
 			keyBits, err := payload.ParseKeyLengthAttr(tr.Attrs)
 			if err != nil {
 				return 0, nil, err
@@ -279,7 +289,7 @@ func (h *Handshake) decodeChildSelection(sa payload.SA) (uint32, *xcrypto.Select
 		}
 	}
 
-	if chosenTR == nil {
+	if selectedTR == nil {
 		return 0, nil, fmt.Errorf("control: CHILD_SA selection missing ENCR transform")
 	}
 	variantOK := false
@@ -335,11 +345,18 @@ func (h *Handshake) decodeChildSelection(sa payload.SA) (uint32, *xcrypto.Select
 	if h.state.SelectedIKE == nil {
 		return 0, nil, fmt.Errorf("control: IKE proposal missing before CHILD_SA selection")
 	}
+	dh := h.state.SelectedIKE.DH
+	if dhID != 0 {
+		if dhID != xcrypto.TransformDHCurve25519 {
+			return 0, nil, fmt.Errorf("control: unsupported CHILD_SA DH group %d", dhID)
+		}
+		dh = &xcrypto.DH{TransformID: dhID, Name: "curve25519"}
+	}
 	return peerSPI, &xcrypto.Selection{
 		Encryption: enc,
 		Integrity:  integ,
 		PRF:        h.state.SelectedIKE.PRF,
-		DH:         h.state.SelectedIKE.DH,
+		DH:         dh,
 	}, nil
 }
 
@@ -402,6 +419,7 @@ func (h *Handshake) deriveChildKeys() (*xcrypto.ChildKeys, error) {
 		h.state.IKEKeys.SKd,
 		h.state.InitiatorNonce,
 		h.state.ResponderNonce,
+		nil,
 		h.state.SelectedESP.Encryption,
 		h.state.SelectedESP.Integrity,
 	)
@@ -440,6 +458,7 @@ type cesSpiNotify struct {
 type cesOffer struct {
 	enc       []xcrypto.EncryptionID
 	integrity []uint16
+	dh        []uint16
 	omitESN   bool
 }
 
@@ -447,20 +466,24 @@ type cesOffer struct {
 // ESP proposals in order, then (for strongswan-compat) AEAD duplicates that
 // omit the NO_EXT_SEQ transform.
 func (h *Handshake) cesChildOffers() ([]cesOffer, error) {
+	return childOffers(h.cfg)
+}
+
+func childOffers(cfg *Config) ([]cesOffer, error) {
 	var offers []cesOffer
 	seen := map[string]bool{}
-	for si := range h.cfg.ESP {
-		suite := &h.cfg.ESP[si]
+	for si := range cfg.ESP {
+		suite := &cfg.ESP[si]
 		mk := func(omit bool) (string, cesOffer) {
 			key := cesOfferKey(suite, omit)
-			return key, cesOffer{enc: suite.Encryption, integrity: suite.Integrity, omitESN: omit}
+			return key, cesOffer{enc: suite.Encryption, integrity: suite.Integrity, dh: suite.DH, omitESN: omit}
 		}
 		key, off := mk(false)
 		if !seen[key] {
 			seen[key] = true
 			offers = append(offers, off)
 		}
-		if h.cfg.StrongswanCompatible {
+		if cfg.StrongswanCompatible {
 			if cesSuiteIsAEAD(suite) {
 				key2, off2 := mk(true)
 				if !seen[key2] {
@@ -514,6 +537,21 @@ func espOfferTransforms(offer cesOffer) ([]payload.Transform, error) {
 	}
 	if !offer.omitESN {
 		transforms = append(transforms, payload.Transform{Type: wire.TransformESN, ID: wire.ESNNoExtendedSequenceNumbers})
+	}
+	return transforms, nil
+}
+
+// childProposalTransforms is espOfferTransforms plus optional RFC 7296
+// 2.17 PFS DH transforms (appended last, after ESN).
+func childProposalTransforms(offer cesOffer, includeDH bool) ([]payload.Transform, error) {
+	transforms, err := espOfferTransforms(offer)
+	if err != nil {
+		return nil, err
+	}
+	if includeDH {
+		for _, dh := range offer.dh {
+			transforms = append(transforms, payload.Transform{Type: wire.TransformDH, ID: dh})
+		}
 	}
 	return transforms, nil
 }

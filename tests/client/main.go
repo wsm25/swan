@@ -34,6 +34,13 @@ func main() {
 		hexDump  = flag.Bool("hex-dump", false, "hex-dump raw wire datagrams")
 		ikeSpec  = flag.String("ike-spec", "aes256gcm16-prfsha512-curve25519", "IKE proposal")
 		espSpec  = flag.String("esp-spec", "aes256gcm16-prfsha512-curve25519", "ESP proposal")
+
+		ikeLifetime      = flag.Duration("ike-lifetime", 4*time.Hour, "IKE soft rekey lifetime")
+		childLifetime    = flag.Duration("child-lifetime", time.Hour, "CHILD soft rekey lifetime")
+		childPFS         = flag.Bool("child-pfs", true, "include KE on CHILD_SA rekey")
+		rekeyRetry       = flag.Duration("rekey-retry", 30*time.Second, "rekey retry backoff")
+		ikeLifePackets   = flag.Uint64("ike-lifepackets", 0, "IKE outbound packet rekey limit (0 disables)")
+		childLifePackets = flag.Uint64("child-lifepackets", 0, "CHILD outbound packet rekey limit (0 disables)")
 	)
 	flag.Parse()
 
@@ -85,6 +92,12 @@ func main() {
 	cfg.EAP.Identity = *eapUser
 	cfg.EAP.Password = *eapPass
 	cfg.EAP.ServerName = "@radius.net.sjtu.edu.cn"
+	cfg.Rekey.IKE.Time = *ikeLifetime
+	cfg.Rekey.IKE.Packets = *ikeLifePackets
+	cfg.Rekey.Child.Time = *childLifetime
+	cfg.Rekey.Child.Packets = *childLifePackets
+	cfg.Rekey.ChildPFS = *childPFS
+	cfg.Rekey.RetryInterval = *rekeyRetry
 
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)

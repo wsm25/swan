@@ -83,8 +83,12 @@ SSL_CERT_FILE=../docker/certs/caCert.pem \
 ```
 
 Extra flags: `-eap-user`, `-eap-pass`, `-event-log`, `-hex-dump`,
-`-ike-spec`, `-esp-spec`. With `-event-log=false` the client prints only
-the handshake result plus the assigned address:
+`-ike-spec`, `-esp-spec`. Rekey lives at test scale via
+`-ike-lifetime` and `-child-lifetime` (for example `-child-lifetime=8s`
+forces many CHILD_SA rekeys per minute: the responder charon log shows the
+corresponding CREATE_CHILD_SA/delete rotation and pings keep succeeding
+across each rekey). With `-event-log=false` the client prints only the
+handshake result plus the assigned address:
 
 ```text
 tunnel up: ipv4=10.31.0.1 ipv6=<nil> dns4=[9.9.9.9 8.8.4.4] dns6=[]
@@ -93,6 +97,13 @@ tunnel up: ipv4=10.31.0.1 ipv6=<nil> dns4=[9.9.9.9 8.8.4.4] dns6=[]
 The `strongswan.conf` attr plugin supplies the DNS fixture
 `dns = 9.9.9.9, 8.8.4.4` for any IKE_AUTH that requests
 INTERNAL_IP4_DNS.
+
+To test peer-initiated rekey acceptance, temporarily add
+`keylife=15s` + `rekeyfuzz=0%` to the `swan4test` connection in
+`tests/docker/ipsec.conf`, copy it into the container, and `podman restart
+swan4-ss` (never `ipsec restart` inside the container: charon is PID 1).
+The client accepts the inbound CREATE_CHILD_SA rekeys and keeps pinging.
+Restore the committed config afterwards.
 
 ## 3) ESP data-plane ping test
 

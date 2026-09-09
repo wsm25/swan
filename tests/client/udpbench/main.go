@@ -44,6 +44,15 @@ const (
 	shutdownTimeout = 10 * time.Second
 )
 
+var (
+	ikeLifetime      = flag.Duration("ike-lifetime", 4*time.Hour, "IKE soft rekey lifetime")
+	childLifetime    = flag.Duration("child-lifetime", time.Hour, "CHILD soft rekey lifetime")
+	childPFS         = flag.Bool("child-pfs", true, "include KE on CHILD_SA rekey")
+	rekeyRetry       = flag.Duration("rekey-retry", 30*time.Second, "rekey retry backoff")
+	ikeLifePackets   = flag.Uint64("ike-lifepackets", 0, "IKE outbound packet rekey limit (0 disables)")
+	childLifePackets = flag.Uint64("child-lifepackets", 0, "CHILD outbound packet rekey limit (0 disables)")
+)
+
 func main() {
 	var (
 		mode       = flag.String("mode", "up", "benchmark direction: up (client pumps) or down (client sinks)")
@@ -208,6 +217,12 @@ func setupTunnel(ctx context.Context, server, eapUser, eapPass, ikeSpec, espSpec
 	cfg.EAP.Identity = eapUser
 	cfg.EAP.Password = eapPass
 	cfg.EAP.ServerName = "@radius.net.sjtu.edu.cn"
+	cfg.Rekey.IKE.Time = *ikeLifetime
+	cfg.Rekey.IKE.Packets = *ikeLifePackets
+	cfg.Rekey.Child.Time = *childLifetime
+	cfg.Rekey.Child.Packets = *childLifePackets
+	cfg.Rekey.ChildPFS = *childPFS
+	cfg.Rekey.RetryInterval = *rekeyRetry
 
 	if err := cfg.Validate(); err != nil {
 		wire.Close()

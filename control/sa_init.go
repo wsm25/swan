@@ -447,6 +447,68 @@ func (h *Handshake) decodeIKESelection(sa payload.SA) (*xcrypto.Selection, error
 	return selection, nil
 }
 
+// decodeIKESelectionWithSPI maps an IKE-rekey selected proposal back onto
+// the local IKE proposal list. The proposal SPI field carries the peer's
+// new IKE SPI (RFC 7296 2.18); it is returned alongside the selection.
+func (h *Handshake) decodeIKESelectionWithSPI(sa payload.SA) (uint64, *xcrypto.Selection, error) {
+	sp := sa.Proposals[0]
+	if sp.ProtocolID != wire.DeleteProtocolIKE || len(sp.SPI) != 8 {
+		return 0, nil, fmt.Errorf("control: invalid selected IKE rekey proposal header")
+	}
+	spi := uint64(sp.SPI[0])<<56 | uint64(sp.SPI[1])<<48 | uint64(sp.SPI[2])<<40 | uint64(sp.SPI[3])<<32 |
+		uint64(sp.SPI[4])<<24 | uint64(sp.SPI[5])<<16 | uint64(sp.SPI[6])<<8 | uint64(sp.SPI[7])
+	idx := int(sp.Num) - 1
+	if idx < 0 || idx >= len(h.cfg.IKE) {
+		return 0, nil, fmt.Errorf("control: peer selected unoffered IKE proposal number %d", sp.Num)
+	}
+
+	var remote xcrypto.Proposal
+	for _, t := range sp.Transforms {
+		switch t.Type {
+		case wire.TransformENC:
+			bits, err := payload.ParseKeyLengthAttr(t.Attrs)
+			if err != nil {
+				return 0, nil, fmt.Errorf("control: selected encryption transform: %w", err)
+			}
+			if bits == 0 || bits%8 != 0 {
+				return 0, nil, fmt.Errorf("control: invalid selected encryption key length %d", bits)
+			}
+			remote.Encryption = append(remote.Encryption, xcrypto.EncryptionID{TransformID: t.ID, KeyLen: bits / 8})
+		case wire.TransformINTEG:
+			if len(t.Attrs) != 0 {
+				return 0, nil, fmt.Errorf("control: unexpected integrity attributes in selected IKE proposal")
+			}
+			remote.Integrity = append(remote.Integrity, t.ID)
+		case wire.TransformPRF:
+			if len(t.Attrs) != 0 {
+				return 0, nil, fmt.Errorf("control: unexpected PRF attributes in selected IKE proposal")
+			}
+			remote.PRF = append(remote.PRF, t.ID)
+		case wire.TransformDH:
+			if len(t.Attrs) != 0 {
+				return 0, nil, fmt.Errorf("control: unexpected DH attributes in selected IKE proposal")
+			}
+			remote.DH = append(remote.DH, t.ID)
+		case wire.TransformESN:
+			return 0, nil, fmt.Errorf("control: unexpected ESN transform in selected IKE proposal")
+		default:
+			return 0, nil, fmt.Errorf("control: unexpected transform type %d in selected IKE proposal", uint8(t.Type))
+		}
+	}
+
+	selection, err := h.cfg.IKE[idx].Select(&remote)
+	if err != nil {
+		return 0, nil, fmt.Errorf("control: peer selected unsupported IKE proposal: %w", err)
+	}
+	if len(remote.Encryption) != 1 || len(remote.PRF) != 1 || len(remote.DH) != 1 {
+		return 0, nil, fmt.Errorf("control: selected IKE proposal missing unique transforms")
+	}
+	if !selectionMatchesIKE(selection, remote) {
+		return 0, nil, fmt.Errorf("control: peer selected transforms do not match the offered IKE proposal")
+	}
+	return spi, selection, nil
+}
+
 // selectionMatchesIKE verifies the negotiated Selection against the exact
 // transform IDs and key length the responder echoed.
 func selectionMatchesIKE(sel *xcrypto.Selection, remote xcrypto.Proposal) bool {

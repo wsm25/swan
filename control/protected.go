@@ -36,6 +36,78 @@ const SkfReassemblyTimeout = 15 * time.Second
 // seen" from "first fragment declared an empty inner chain".
 const skfFirstPayloadUnset wire.PayloadType = 0xff
 
+// ikeEnvelope is the per-SPI IKE crypto context used to seal/open
+// protected messages. The active SA and each retained old IKE SA supply
+// one; key direction and header initiator flags derive from it.
+type ikeEnvelope struct {
+	InitiatorSPI        uint64
+	ResponderSPI        uint64
+	IsOriginalInitiator bool
+	SelectedIKE         *xcrypto.Selection
+	IKEKeys             *xcrypto.IKEKeys
+	Peer                PeerCapabilities
+}
+
+// stateIKEEnvelope extracts the active IKE SA crypto envelope.
+func stateIKEEnvelope(state *State) ikeEnvelope {
+	return ikeEnvelope{
+		InitiatorSPI:        state.InitiatorSPI,
+		ResponderSPI:        state.ResponderSPI,
+		IsOriginalInitiator: state.IsOriginalInitiator,
+		SelectedIKE:         state.SelectedIKE,
+		IKEKeys:             state.IKEKeys,
+		Peer:                state.Peer,
+	}
+}
+
+// oldIKEEnvelope extracts one retained old IKE SA crypto envelope.
+func oldIKEEnvelope(ctx *OldIKEContext) ikeEnvelope {
+	return ikeEnvelope{
+		InitiatorSPI:        ctx.InitiatorSPI,
+		ResponderSPI:        ctx.ResponderSPI,
+		IsOriginalInitiator: ctx.IsOriginalInitiator,
+		SelectedIKE:         ctx.SelectedIKE,
+		IKEKeys:             ctx.IKEKeys,
+	}
+}
+
+// requestFlags returns the FlagInitiator bit for an outbound request on the
+// given envelope; the original initiator sets it, the original responder
+// does not (RFC 7296 2.8.2).
+func requestFlags(env ikeEnvelope) wire.Flags {
+	if env.IsOriginalInitiator {
+		return wire.FlagInitiator
+	}
+	return 0
+}
+
+// responseFlags returns the header flags for a response built from the
+// given envelope: FlagResponse, plus FlagInitiator when the sender is the
+// original initiator of that IKE SA (RFC 7296 2.2).
+func responseFlags(env ikeEnvelope) wire.Flags {
+	return wire.FlagResponse | requestFlags(env)
+}
+
+// inboundKeyHalves returns the keys used to decrypt traffic sent by the
+// peer: original initiator receives with SKer/SKar, original responder
+// receives with SKei/SKai.
+func inboundKeyHalves(env ikeEnvelope) (encKey, integKey []byte) {
+	if env.IsOriginalInitiator {
+		return env.IKEKeys.SKer, env.IKEKeys.SKar
+	}
+	return env.IKEKeys.SKei, env.IKEKeys.SKai
+}
+
+// outboundKeyHalves returns the keys used to encrypt traffic we send:
+// original initiator sends with SKei/SKai, original responder with
+// SKer/SKar.
+func outboundKeyHalves(env ikeEnvelope) (encKey, integKey []byte) {
+	if env.IsOriginalInitiator {
+		return env.IKEKeys.SKei, env.IKEKeys.SKai
+	}
+	return env.IKEKeys.SKer, env.IKEKeys.SKar
+}
+
 // buildProtected renders one protected request: plaintext payloads are
 // padded (pad len byte, 1..n pattern), encrypted under the IKE keys and
 // fragmented into SKFs when required. Returns ready-to-send frames.
@@ -48,14 +120,15 @@ func (h *Handshake) buildProtected(exchange wire.ExchangeType, msgID uint32, nex
 	if h != nil {
 		state = h.state
 	}
-	return buildProtectedStateAs(cfg, state, exchange, msgID, nextPayload, plaintext, wire.FlagInitiator)
+	return buildProtectedStateAs(cfg, state, exchange, msgID, nextPayload, plaintext, requestFlags(stateIKEEnvelope(state)))
 }
 
-// buildProtectedState is the package-level protected-message builder for
-// initiator-flagged requests, shared by Handshake, Running and the close
-// sequence. cfg may be nil (defaults).
+// buildProtectedState is the package-level protected-message builder shared
+// by Handshake, Running and the close sequence. The initiator flag is role
+// aware so a peer-initiated IKE rekey correctly sends later requests as the
+// original responder. cfg may be nil (defaults).
 func buildProtectedState(cfg *Config, state *State, exchange wire.ExchangeType, msgID uint32, nextPayload wire.PayloadType, plaintext []byte) ([]*transport.Frame, error) {
-	return buildProtectedStateAs(cfg, state, exchange, msgID, nextPayload, plaintext, wire.FlagInitiator)
+	return buildProtectedStateAs(cfg, state, exchange, msgID, nextPayload, plaintext, requestFlags(stateIKEEnvelope(state)))
 }
 
 // buildProtectedStateAs is buildProtectedState with an explicit header flag
@@ -65,10 +138,16 @@ func buildProtectedStateAs(cfg *Config, state *State, exchange wire.ExchangeType
 	if state == nil {
 		return nil, fmt.Errorf("control: missing SA state for protected build")
 	}
-	if state.SelectedIKE == nil || state.IKEKeys == nil {
+	return buildProtectedEnvelopeAs(cfg, stateIKEEnvelope(state), exchange, msgID, nextPayload, plaintext, flags)
+}
+
+// buildProtectedEnvelopeAs is the envelope-generic protected builder used
+// for both the active and retained old IKE SA contexts.
+func buildProtectedEnvelopeAs(cfg *Config, env ikeEnvelope, exchange wire.ExchangeType, msgID uint32, nextPayload wire.PayloadType, plaintext []byte, flags wire.Flags) ([]*transport.Frame, error) {
+	if env.SelectedIKE == nil || env.IKEKeys == nil {
 		return nil, fmt.Errorf("control: IKE cipher state missing for protected build")
 	}
-	if state.InitiatorSPI == 0 {
+	if env.InitiatorSPI == 0 {
 		return nil, fmt.Errorf("control: initiator SPI missing for protected build")
 	}
 
@@ -77,7 +156,7 @@ func buildProtectedStateAs(cfg *Config, state *State, exchange wire.ExchangeType
 		chunk = cfg.FragmentPlaintextLimit
 	}
 	total := 1
-	if state.Peer.SupportsFragmentation && len(plaintext) > chunk {
+	if env.Peer.SupportsFragmentation && len(plaintext) > chunk {
 		total = (len(plaintext) + chunk - 1) / chunk
 	}
 	if total > 0xffff {
@@ -110,7 +189,7 @@ func buildProtectedStateAs(cfg *Config, state *State, exchange wire.ExchangeType
 			}
 		}
 
-		frame, err := sealProtectedPacket(state, exchange, msgID, innerNext, encType, frag, part, flags)
+		frame, err := sealProtectedEnvelope(env, exchange, msgID, innerNext, encType, frag, part, flags)
 		if err != nil {
 			return nil, err
 		}
@@ -119,12 +198,11 @@ func buildProtectedStateAs(cfg *Config, state *State, exchange wire.ExchangeType
 	return frames, nil
 }
 
-// sealProtectedPacket builds one complete SK or SKF packet. The caller
+// sealProtectedEnvelope builds one complete SK or SKF packet. The caller
 // passes one unpadded plaintext chunk; padding is applied here because each
 // SKF fragment is padded independently (swan2 push_encrypt semantics).
-func sealProtectedPacket(state *State, exchange wire.ExchangeType, msgID uint32, innerNext wire.PayloadType, encType wire.PayloadType, frag *wire.SkfHeader, plaintext []byte, flags wire.Flags) (*transport.Frame, error) {
-	sel := state.SelectedIKE
-	keys := state.IKEKeys
+func sealProtectedEnvelope(env ikeEnvelope, exchange wire.ExchangeType, msgID uint32, innerNext wire.PayloadType, encType wire.PayloadType, frag *wire.SkfHeader, plaintext []byte, flags wire.Flags) (*transport.Frame, error) {
+	sel := env.SelectedIKE
 	enc := sel.Encryption
 	integ := sel.Integrity
 
@@ -147,8 +225,8 @@ func sealProtectedPacket(state *State, exchange wire.ExchangeType, msgID uint32,
 	}
 
 	hdr := wire.Header{
-		InitiatorSPI: wire.Uint64SPI(state.InitiatorSPI),
-		ResponderSPI: wire.Uint64SPI(state.ResponderSPI),
+		InitiatorSPI: wire.Uint64SPI(env.InitiatorSPI),
+		ResponderSPI: wire.Uint64SPI(env.ResponderSPI),
 		NextPayload:  encType,
 		Version:      wire.IKEDefaultVersion,
 		ExchangeType: exchange,
@@ -204,7 +282,8 @@ func sealProtectedPacket(state *State, exchange wire.ExchangeType, msgID uint32,
 		return nil, fmt.Errorf("control: generate IKE IV: %w", err)
 	}
 
-	sealed, err := enc.Seal(keys.SKei, iv, aad, padded)
+	encKey, integKey := outboundKeyHalves(env)
+	sealed, err := enc.Seal(encKey, iv, aad, padded)
 	if err != nil {
 		return nil, fmt.Errorf("control: encrypt protected payload: %w", err)
 	}
@@ -213,7 +292,7 @@ func sealProtectedPacket(state *State, exchange wire.ExchangeType, msgID uint32,
 	pkt = append(pkt, sealed...)
 
 	if !enc.AEAD {
-		icv, err := integ.Sign(keys.SKai, pkt)
+		icv, err := integ.Sign(integKey, pkt)
 		if err != nil {
 			return nil, fmt.Errorf("control: sign IKE packet: %w", err)
 		}
@@ -244,7 +323,14 @@ func (h *Handshake) openProtected(m *wire.Message) ([]wire.Payload, error) {
 	if err != nil {
 		return nil, err
 	}
-	plain, err := openEncryptedBody(sel, keys.SKer, keys.SKar, aad, enc.Body)
+	encKey, integKey := inboundKeyHalves(ikeEnvelope{
+		InitiatorSPI:        h.state.InitiatorSPI,
+		ResponderSPI:        h.state.ResponderSPI,
+		IsOriginalInitiator: h.state.IsOriginalInitiator,
+		SelectedIKE:         sel,
+		IKEKeys:             keys,
+	})
+	plain, err := openEncryptedBody(sel, encKey, integKey, aad, enc.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -332,8 +418,8 @@ func openProtectedRawState(cfg *Config, state *State, raw []byte) ([]wire.Payloa
 			ivStart := bodyStart
 			aad := raw[:ivStart]
 			body := raw[ivStart:payloadEnd]
-			keys := state.IKEKeys
-			plain, err := openEncryptedBody(state.SelectedIKE, keys.SKer, keys.SKar, aad, body)
+			encKey, integKey := inboundKeyHalves(stateIKEEnvelope(state))
+			plain, err := openEncryptedBody(state.SelectedIKE, encKey, integKey, aad, body)
 			if err != nil {
 				return nil, false, err
 			}
@@ -379,6 +465,36 @@ func openProtectedRawState(cfg *Config, state *State, raw []byte) ([]wire.Payloa
 	}
 
 	return nil, false, fmt.Errorf("control: protected packet has no encrypted payload")
+}
+
+// openProtectedMessageEnvelope decrypts a complete, non-fragmented SK
+// message with an explicit envelope (used for retained old IKE SAs whose
+// DELETE exchanges never fragment in the MVP profile).
+func openProtectedMessageEnvelope(env ikeEnvelope, raw []byte) ([]wire.Payload, error) {
+	msg, err := wire.ParseMessage(raw)
+	if err != nil {
+		return nil, err
+	}
+	if msg.Encrypted == nil {
+		return msg.Payloads, nil
+	}
+	if msg.Encrypted.Fragmented {
+		return nil, fmt.Errorf("control: fragmented old-SA IKE packet is unsupported")
+	}
+	aad, err := rebuildPrefix(msg)
+	if err != nil {
+		return nil, err
+	}
+	encKey, integKey := inboundKeyHalves(env)
+	plain, err := openEncryptedBody(env.SelectedIKE, encKey, integKey, aad, msg.Encrypted.Body)
+	if err != nil {
+		return nil, err
+	}
+	payloads, _, err := wire.ParsePayloads(plain, msg.Encrypted.InnerNext, false)
+	if err != nil {
+		return nil, err
+	}
+	return payloads, nil
 }
 
 // openEncryptedBody decrypts/authenticates one SK or SKF body

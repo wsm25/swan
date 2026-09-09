@@ -43,12 +43,44 @@ type Config struct {
 	// PEAP MSK export label and AEAD ESP proposals omitting NO_EXT_SEQ.
 	StrongswanCompatible bool
 
+	// Rekey carries lifetime/PFS/rekey policy (copied by value from swan).
+	Rekey RekeyConfig
+
 	// Timeouts control the exchange helpers.
 	Timeouts Timeouts
 	// FragmentPlaintextLimit is the plaintext size above which outbound
 	// protected requests are fragmented (SKF), and only when the peer
 	// advertised FRAGMENTATION_SUPPORTED. Default 1024.
 	FragmentPlaintextLimit int
+
+	// DataUpdates receives rekey/lease updates for the public Session's
+	// data-plane wiring. Send-only, bounded, consumed by Session.
+	DataUpdates chan<- DataplaneUpdate
+	// NearWrap receives the data plane's non-blocking emergency child-rekey
+	// trigger.
+	NearWrap <-chan struct{}
+}
+
+// Lifetime limits one SA family. Zero Time is replaced in normalizeConfig
+// for the MVP profile; byte/packet limits may be zero.
+type Lifetime struct {
+	Time    time.Duration
+	Bytes   uint64
+	Packets uint64
+}
+
+// RekeyConfig mirrors swan.RekeyConfig for the control layer.
+type RekeyConfig struct {
+	IKE   Lifetime
+	Child Lifetime
+
+	// ChildPFS makes a CHILD_SA rekey include KEi/KEr (RFC 7296 2.17).
+	ChildPFS bool
+	// RandTime is the caller-level backoff cap; zero derives 10% of each
+	// SA family soft lifetime in Running's deadline arithmetic.
+	RandTime          time.Duration
+	RetryInterval     time.Duration
+	NearWrapThreshold float64
 }
 
 // Timeouts are exchange-level timings. Zero values are replaced by New.
@@ -99,6 +131,27 @@ func (c *Config) Validate() error {
 	}
 	if c.FragmentPlaintextLimit <= 0 {
 		return fmt.Errorf("control: FragmentPlaintextLimit must be > 0")
+	}
+	if c.Rekey.IKE.Time <= 0 {
+		return fmt.Errorf("control: Rekey.IKE.Time must be > 0")
+	}
+	if c.Rekey.Child.Time <= 0 {
+		return fmt.Errorf("control: Rekey.Child.Time must be > 0")
+	}
+	if c.Rekey.RetryInterval <= 0 {
+		return fmt.Errorf("control: Rekey.RetryInterval must be > 0")
+	}
+	if c.Rekey.ChildPFS {
+		pfsOK := false
+		for _, esp := range c.ESP {
+			if len(esp.DH) > 0 {
+				pfsOK = true
+				break
+			}
+		}
+		if !pfsOK {
+			return fmt.Errorf("control: ChildPFS requires at least one ESP proposal with a DH group")
+		}
 	}
 	return nil
 }

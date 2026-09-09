@@ -148,7 +148,18 @@ func main() {
 - DNS from the CP reply is reported through `Tunnel.Assigned()` as
   `DNS4` and `DNS6`, alongside `InternalIPv4` and `InternalIPv6`.
   `Assigned().AddressExpirySeconds` is populated when the responder sends an
-  `INTERNAL_ADDRESS_EXPIRY` attribute, but lease renewal is not implemented.
+  `INTERNAL_ADDRESS_EXPIRY` attribute. Lease renewal runs at 80% of that
+  value (INFORMATIONAL + CFG_REQUEST); a failed renewal retries and a hard
+  expiry is treated as a session failure.
+- Rekey:
+  - initiator CHILD_SA rekey (soft lifetime, optional PFS KE, byte/packet
+    thresholds, and an emergency near-wraparound trigger); during the
+    handoff the old inbound SA still decrypts until the old CHILD_SA is
+    deleted
+  - initiator IKE_SA rekey (new SPI pair, fresh DH/nonces, SKEYSEED rederive)
+    with message-id reset for the new IKE SA
+  - peer-initiated CHILD_SA and IKE_SA rekeys are accepted (role flip for
+    peer-initiated IKE rekey included)
 - Event ordering on success is
   `Starting -> HandshakeStarted -> HandshakeCompleted -> ConfigAssigned -> Started`,
   with stage, EAP, and negotiated-algorithm events in between. After a
@@ -158,13 +169,20 @@ func main() {
 
 ## Limitations
 
-- The initiator does not initiate rekeying: no CREATE_CHILD_SA refresh.
-- A peer CREATE_CHILD_SA is refused with `NO_ADDITIONAL_SAS`; the existing
-  CHILD_SA and IKE SA keep running.
-- The outbound ESP sequence number stops at `2^32-1`. Sending packet
-  `2^32-1` then attempting another send reports
-  `swan/esp: ESP sequence number wrapped after 2^32-1 packets`, which the
-  session converts into `Broken` and shutdown.
+- Simultaneous CHILD_SA rekey (a peer rekey arrives while our child rekey is
+  in flight) is answered with `TEMPORARY_FAILURE`; the peer retries later.
+  Consensus-close-out by lowest nonce (RFC 7296 2.17 behavior) is not
+  implemented.
+- The old inbound CHILD_SA context is dropped when the peer acknowledges the
+  old child deletion (strongSwan sends it); there is no additional hard time
+  bound if a peer stays silent after a rekey.
+- `Rekey.IKE.Bytes` and `Rekey.IKE.Packets` are parsed but not enforced
+  (IKE-side flow counters are not tracked); IKE rekey is time-driven.
+  CHILD_SA byte/packet thresholds are enforced on the outbound path.
+- The outbound ESP sequence number still stops at `2^32-1`; with the
+  near-wraparound emergency rekey this should be unreachable in practice.
+  Reaching it reports `swan/esp: ESP sequence number wrapped after 2^32-1
+  packets` and the session converts it into `Broken` and shutdown.
 - Local pubkey AUTH is not exercised; local auth is EAP-PEAP only.
 - The test path is the containerized strongSwan/FreeRADIUS setup in
   `tests/README.md`. The handshake and ping flow work against that

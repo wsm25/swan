@@ -2,8 +2,10 @@ package esp
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"swan/transport"
 )
@@ -50,9 +52,11 @@ func (p *InboundPacket) Release() {
 // Shutdown order for the Session: cancel ctx (or close espIn/ipIn) first,
 // wait on Done, and only then close ipOut/tx. Otherwise a sender could
 // observe a closed receiver channel.
+type inboundTable map[uint32]*Inbound
+
 type Pipeline struct {
-	inbound  *Inbound
-	outbound *Outbound
+	inbound  atomic.Pointer[inboundTable]
+	outbound atomic.Pointer[Outbound]
 
 	espIn <-chan []*transport.Packet
 	ipIn  <-chan []byte
@@ -74,9 +78,7 @@ type Pipeline struct {
 // NewPipeline binds the codec pair and the four channels. Channels must be
 // bounded; ownership of each message follows the package comment.
 func NewPipeline(inbound *Inbound, outbound *Outbound, espIn <-chan []*transport.Packet, ipIn <-chan []byte, ipOut chan<- []InboundPacket, tx chan<- *transport.Frame, childClosed <-chan struct{}, fatalOut chan<- error) *Pipeline {
-	return &Pipeline{
-		inbound:     inbound,
-		outbound:    outbound,
+	p := &Pipeline{
 		espIn:       espIn,
 		ipIn:        ipIn,
 		ipOut:       ipOut,
@@ -85,6 +87,61 @@ func NewPipeline(inbound *Inbound, outbound *Outbound, espIn <-chan []*transport
 		fatalOut:    fatalOut,
 		done:        make(chan struct{}),
 	}
+	table := make(inboundTable)
+	if inbound != nil {
+		table[inbound.cfg.SPI] = inbound
+	}
+	p.inbound.Store(&table)
+	p.outbound.Store(outbound)
+	return p
+}
+
+// ReplaceChild atomically installs the new outbound codec and a multi-SPI
+// inbound table retaining the old inbound codec for make-before-break. The
+// old table is copied; oldInboundSPI==0 keeps only the new codec.
+func (p *Pipeline) ReplaceChild(inbound *Inbound, outbound *Outbound, oldInboundSPI uint32) {
+	if p == nil || inbound == nil {
+		return
+	}
+	table := make(inboundTable)
+	if old := p.inbound.Load(); old != nil {
+		for spi, codec := range *old {
+			if spi != inbound.cfg.SPI {
+				table[spi] = codec
+			}
+		}
+	}
+	if oldInboundSPI != 0 {
+		// Preserve the old codec even if it was not in the table (defensive).
+	}
+	table[inbound.cfg.SPI] = inbound
+	p.inbound.Store(&table)
+	if outbound != nil {
+		p.outbound.Store(outbound)
+	}
+}
+
+// DropInboundSPI removes one inbound codec by its local (inbound) ESP SPI.
+// The active child must never be dropped through this path until the public
+// Session has marked the tunnel ended.
+func (p *Pipeline) DropInboundSPI(spi uint32) {
+	if p == nil || spi == 0 {
+		return
+	}
+	old := p.inbound.Load()
+	if old == nil {
+		return
+	}
+	if _, ok := (*old)[spi]; !ok {
+		return
+	}
+	table := make(inboundTable)
+	for have, codec := range *old {
+		if have != spi {
+			table[have] = codec
+		}
+	}
+	p.inbound.Store(&table)
 }
 
 // Run starts the inbound and outbound workers, then blocks until ctx is
@@ -213,7 +270,18 @@ func (p *Pipeline) reportFatal(err error) {
 }
 
 func (p *Pipeline) processInbound(pkt *transport.Packet) (InboundPacket, error) {
-	ip, release, err := p.inbound.ProcessPooled(pkt.Payload)
+	if len(pkt.Payload) < 4 {
+		return InboundPacket{}, errors.New("swan/esp: ESP packet too short for SPI")
+	}
+	table := p.inbound.Load()
+	if table == nil {
+		return InboundPacket{}, errors.New("swan/esp: inbound codec table missing")
+	}
+	codec := (*table)[binary.BigEndian.Uint32(pkt.Payload[:4])]
+	if codec == nil {
+		return InboundPacket{}, errors.New("swan/esp: ESP SPI does not match a known inbound SPI")
+	}
+	ip, release, err := codec.ProcessPooled(pkt.Payload)
 	if err != nil {
 		return InboundPacket{}, err
 	}
@@ -261,8 +329,12 @@ func (p *Pipeline) runOutbound(ctx context.Context) {
 
 	encrypt:
 		frames := make([]*transport.Frame, 0, len(packets))
+		outbound := p.outbound.Load()
+		if outbound == nil {
+			return
+		}
 		for _, pkt := range packets {
-			datagram, release, err := p.outbound.process(pkt, true)
+			datagram, release, err := outbound.process(pkt, true)
 			if err != nil {
 				if errors.Is(err, ErrSeqWrapped) {
 					p.reportFatal(err)

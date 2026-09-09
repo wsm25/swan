@@ -82,6 +82,32 @@ func normalizeConfig(cfg *Config) {
 	if cfg.FragmentPlaintextLimit <= 0 {
 		cfg.FragmentPlaintextLimit = FragmentPlaintextLimit
 	}
+	if cfg.Rekey.IKE.Time <= 0 {
+		cfg.Rekey.IKE.Time = 4 * time.Hour
+	}
+	if cfg.Rekey.Child.Time <= 0 {
+		cfg.Rekey.Child.Time = time.Hour
+	}
+	if cfg.Rekey.RetryInterval <= 0 {
+		cfg.Rekey.RetryInterval = 30 * time.Second
+	}
+	if cfg.Rekey.NearWrapThreshold <= 0 {
+		cfg.Rekey.NearWrapThreshold = 0.9
+	}
+	if cfg.Rekey.NearWrapThreshold < 0.1 {
+		cfg.Rekey.NearWrapThreshold = 0.1
+	}
+	if cfg.Rekey.NearWrapThreshold > 0.999 {
+		cfg.Rekey.NearWrapThreshold = 0.999
+	}
+	if cfg.Rekey.RandTime > 0 {
+		if cfg.Rekey.RandTime > cfg.Rekey.IKE.Time {
+			cfg.Rekey.RandTime = cfg.Rekey.IKE.Time
+		}
+		if cfg.Rekey.RandTime > cfg.Rekey.Child.Time {
+			cfg.Rekey.RandTime = cfg.Rekey.Child.Time
+		}
+	}
 }
 
 // Run executes the handshake actor, then — on success — starts the Running
@@ -291,7 +317,7 @@ func (c *Control) runHandshake(ctx context.Context, in <-chan *transport.Packet,
 	st.HasExpectedResponse = false
 	st.ExpectedResponseMessageID = 0
 	childClosed := make(chan struct{})
-	running := &Running{state: st, events: h.events, cfg: c.cfg, childClosed: childClosed}
+	running := &Running{state: st, events: h.events, cfg: c.cfg}
 	armed := make(chan struct{})
 	terminated := make(chan error, 1)
 	go func() {

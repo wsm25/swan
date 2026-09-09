@@ -56,6 +56,40 @@ type Config struct {
 
 	Queue    QueueSizes
 	Timeouts Timeouts
+	Rekey    RekeyConfig
+}
+
+// Lifetime limits one SA family. Zero time means disabled. For the IKE SA
+// the soft rekey is time-driven; Bytes and Packets are currently ignored
+// for IKE (they apply to the CHILD SA outbound path only).
+type Lifetime struct {
+	Time    time.Duration // soft rekey limit
+	Bytes   uint64        // outbound byte limit, 0 = disabled
+	Packets uint64        // outbound packet limit, 0 = disabled
+}
+
+// RekeyConfig groups rekey/lifetime policy.
+type RekeyConfig struct {
+	IKE   Lifetime
+	Child Lifetime
+
+	// ChildPFS makes a CHILD_SA rekey include KEi/KEr (RFC 7296 2.17).
+	// The DH group comes from the selected ESP proposal's DH list.
+	ChildPFS bool
+
+	// RandTime is the maximum random backoff subtracted from soft rekey
+	// deadlines before starting a rekey (RFC 7296 2.8 jitter). Zero uses
+	// 10% of each SA family's soft lifetime.
+	RandTime time.Duration
+
+	// RetryInterval is the backoff before retrying a failed rekey.
+	// The old SA stays alive across rekey failures.
+	RetryInterval time.Duration
+
+	// NearWrapThreshold is the fraction of the ESP sequence space at
+	// which the data plane raises an emergency rekey trigger.
+	// Values clamp to [0.1, 0.999]; 0 uses the default.
+	NearWrapThreshold float64
 }
 
 // QueueSizes bounds every channel between layers. Zero values are replaced
@@ -107,6 +141,13 @@ func DefaultConfig(peerIP net.IP) Config {
 			MaxRTO:               8 * time.Second,
 			MaxRetries:           5,
 			SkfReassemblyTimeout: 15 * time.Second,
+		},
+		Rekey: RekeyConfig{
+			IKE:               Lifetime{Time: 4 * time.Hour},
+			Child:             Lifetime{Time: time.Hour},
+			ChildPFS:          true,
+			RetryInterval:     30 * time.Second,
+			NearWrapThreshold: 0.9,
 		},
 	}
 }
@@ -173,6 +214,35 @@ func (c *Config) Validate() error {
 	}
 	if c.Timeouts.SkfReassemblyTimeout <= 0 {
 		return fmt.Errorf("swan: SkfReassemblyTimeout must be > 0")
+	}
+	if c.Rekey.IKE.Time <= 0 {
+		return fmt.Errorf("swan: Rekey.IKE.Time must be > 0")
+	}
+	if c.Rekey.Child.Time <= 0 {
+		return fmt.Errorf("swan: Rekey.Child.Time must be > 0")
+	}
+	if c.Rekey.RandTime > 0 {
+		if c.Rekey.RandTime > c.Rekey.IKE.Time {
+			return fmt.Errorf("swan: Rekey.RandTime must be <= Rekey.IKE.Time")
+		}
+		if c.Rekey.RandTime > c.Rekey.Child.Time {
+			return fmt.Errorf("swan: Rekey.RandTime must be <= Rekey.Child.Time")
+		}
+	}
+	if c.Rekey.RetryInterval <= 0 {
+		return fmt.Errorf("swan: Rekey.RetryInterval must be > 0")
+	}
+	if c.Rekey.ChildPFS {
+		pfsOK := false
+		for _, esp := range c.ESPProposals {
+			if len(esp.DH) > 0 {
+				pfsOK = true
+				break
+			}
+		}
+		if !pfsOK {
+			return fmt.Errorf("swan: ChildPFS requires at least one ESP proposal with a DH group")
+		}
 	}
 	return nil
 }
