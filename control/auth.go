@@ -57,7 +57,6 @@ func (h *Handshake) buildBootstrapAuthRequest(msgID uint32) ([]*transport.Frame,
 		wire.NotifyNoAdditionalAddresses,
 		wire.NotifyMultipleAuthSupported,
 		wire.NotifyEapOnlyAuthentication,
-		wire.NotifyIKEv2MessageIDSyncSupported,
 	} {
 		parts = append(parts, cesPayloadPart{
 			typ:  wire.PayloadTypeNotify,

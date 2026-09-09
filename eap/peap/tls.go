@@ -80,6 +80,12 @@ type Engine struct {
 	// outbound carries TLS records produced by the TLS stack (read from the
 	// peer side by the relay) back to Start/Feed/Protect callers.
 	outbound chan []byte
+	// flushReq is the handshake-completion barrier: the handshake goroutine
+	// asks the relay to pump every byte the TLS stack already wrote out of
+	// the pipe into outbound BEFORE handshakeDone is published, so a
+	// collect observing completion can never strand the client's Finished
+	// flight inside the pipe.
+	flushReq chan chan struct{}
 
 	stop chan struct{}
 	done chan struct{}
@@ -89,6 +95,7 @@ type Engine struct {
 	wg            sync.WaitGroup
 	startErr      error
 	started       bool
+	launched      bool
 	handshakeDone chan error
 	established   atomic.Bool
 }
@@ -114,7 +121,7 @@ func NewEngine(serverName string, opts Options, roots *x509.CertPool) (*Engine, 
 		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tls.VersionTLS13,
 		RootCAs:            pool,
-		InsecureSkipVerify: false, // verification is explicit below
+		InsecureSkipVerify: opts.InsecureSkipVerify, // uTLS' own gate, mirrored
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if opts.InsecureSkipVerify {
 				return nil // chain checked nowhere; FSM verifies identity later
@@ -158,6 +165,7 @@ func NewEngine(serverName string, opts Options, roots *x509.CertPool) (*Engine, 
 		peer:       peerSide,
 		inbound:    make(chan []byte, 16),
 		outbound:   make(chan []byte, 32),
+		flushReq:   make(chan chan struct{}, 2),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
 	}, nil
@@ -331,37 +339,70 @@ func (e *Engine) tls12PRF(secret []byte, label string, seed []byte, length int) 
 	return out[:length]
 }
 
-// Close stops the relay worker and releases the TLS session.
+// Close stops the relay worker and releases the TLS session. It is also
+// safe on engines that never started: those return immediately instead of
+// waiting for a relay that was never launched.
 func (e *Engine) Close() error {
 	e.closeOnce.Do(func() {
 		close(e.stop)
 		_ = e.client.Close()
 		_ = e.peer.Close()
-		select {
-		case <-e.done:
-		case <-time.After(500 * time.Millisecond):
+		if e.launched {
+			select {
+			case <-e.done:
+			case <-time.After(500 * time.Millisecond):
+			}
+			e.wg.Wait()
 		}
-		e.wg.Wait()
 	})
 	return nil
 }
 
 // launch starts the relay and drives the TLS handshake in one goroutine.
 // The handshake goroutine's writes are mirrored by the relay; its reads are
-// satisfied by Feed.
+// satisfied by Feed. Completion is published only after the relay has
+// flushed the client's final flight (see flushReq).
 func (e *Engine) launch() error {
 	e.handshakeDone = make(chan error, 1)
 	e.started = true
+	e.launched = true
 	e.wg.Add(2)
 	go e.relay()
 	go func() {
 		err := e.client.Handshake()
+		// Barrier: publish completion only after the relay has pumped every
+		// outbound TLS byte (the client Finished flight) into the outbound
+		// queue. Without it a fast handshake races the relay poll and the
+		// collector would answer with an empty ACK instead of TLS data.
+		e.requestFlush()
 		if err == nil {
+			// Store only after the barrier: Established() and every collect
+			// observation are then guaranteed to see a flushed final
+			// flight.
 			e.established.Store(e.client.ConnectionState().HandshakeComplete)
 		}
 		e.handshakeDone <- err
 	}()
 	return nil
+}
+
+// requestFlush hands the relay a flush barrier and waits (bounded) for it.
+func (e *Engine) requestFlush() {
+	fl := make(chan struct{})
+	select {
+	case e.flushReq <- fl:
+	case <-e.stop:
+		return
+	}
+	t := time.NewTimer(2 * time.Second)
+	defer t.Stop()
+	select {
+	case <-fl:
+	case <-e.stop:
+	case <-t.C:
+		// Relay observed stop or a broken pipe; handshakeDone remains the
+		// authoritative signal either way.
+	}
 }
 
 // relay pumps bytes between the TLS stack and the PEAP FSM:
@@ -404,6 +445,42 @@ func (e *Engine) relay() {
 			default:
 				goto readPeer
 			}
+		}
+
+		// Handshake-completion barrier: drain the client side until it
+		// stays quiet for a poll interval, then deliver everything queued
+		// before releasing the waiting handshake goroutine.
+		select {
+		case fl := <-e.flushReq:
+			for {
+				_ = e.peer.SetReadDeadline(time.Now().Add(relayPollInterval))
+				n, err := e.peer.Read(buf)
+				if n > 0 {
+					pending = append(pending, append([]byte(nil), buf[:n]...))
+					continue
+				}
+				if err != nil {
+					var ne net.Error
+					if errors.As(err, &ne) && ne.Timeout() {
+						break // one full poll interval of silence
+					}
+				}
+				break
+			}
+			// The FSM is inside collect while the handshake completes, so
+			// outbound is being drained; these sends are bounded by the
+			// queue and stop.
+			for len(pending) > 0 {
+				select {
+				case e.outbound <- pending[0]:
+					pending = pending[1:]
+				case <-e.stop:
+					return
+				}
+			}
+			close(fl)
+			continue
+		default:
 		}
 
 	readPeer:
@@ -487,7 +564,9 @@ func (e *Engine) collect(waitFirst time.Duration) (out []byte, established bool,
 				}
 			default:
 			}
-			established = e.established.Load()
+			// Established is reported ONLY via handshakeDone: the atomic is
+			// set after the flush barrier, and reading it here would let a
+			// quiet-window expiry observe completion before the barrier.
 			return
 		}
 	}

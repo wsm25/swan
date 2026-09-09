@@ -68,11 +68,14 @@ func (p *PRF) Plus(key, seed []byte, outLen int) ([]byte, error) {
 	}
 	out := make([]byte, 0, outLen)
 	var previous []byte
-	for counter := byte(1); len(out) < outLen; counter++ {
+	for counter := 1; len(out) < outLen; counter++ {
+		if counter > 255 {
+			return nil, errors.New("xcrypto: PRF+ output exceeds 255 blocks")
+		}
 		m := hmac.New(p.newHMAC, key)
 		m.Write(previous)
 		m.Write(seed)
-		m.Write([]byte{counter})
+		m.Write([]byte{byte(counter)})
 		previous = m.Sum(previous[:0])
 		out = append(out, previous...)
 	}

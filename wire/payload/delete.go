@@ -15,7 +15,20 @@ type Delete struct {
 
 // AppendDelete serializes the DELETE payload body; PRECONDITION: SPIs empty
 // for DeleteProtocolIKE, exactly one for the MVP's CHILD_SA delete.
+// Invalid combinations that cannot be encoded fail hard (panic).
 func AppendDelete(dst []byte, d Delete) []byte {
+	switch d.ProtocolID {
+	case wire.DeleteProtocolIKE:
+		if len(d.SPIs) != 0 {
+			panic("swan/payload: IKE delete must not carry SPIs")
+		}
+	case wire.DeleteProtocolESP:
+		if len(d.SPIs) == 0 || len(d.SPIs) > 0xFFFF {
+			panic("swan/payload: ESP delete must carry 1..65535 SPIs")
+		}
+	default:
+		panic(fmt.Sprintf("swan/payload: unsupported delete protocol %d", d.ProtocolID))
+	}
 	spiSize := byte(0)
 	if d.ProtocolID == wire.DeleteProtocolESP {
 		spiSize = 4

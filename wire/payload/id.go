@@ -60,11 +60,14 @@ func ClassifyID(s string) (ID, error) {
 	if rest, ok := trimPrefix(value, "#"); ok {
 		return keyID(rest)
 	}
-	if rest, ok := trimPrefix(value, "fqdn:", "dns:", "%", "@"); ok {
+	if rest, ok := trimPrefix(value, "fqdn:", "dns:", "%"); ok {
 		return id(wire.IDFqdn, rest)
 	}
 	if rest, ok := trimPrefix(value, "rfc822:", "email:", "userfqdn:", "@@"); ok {
 		return id(wire.IDRfc822Addr, rest)
+	}
+	if rest, ok := trimPrefix(value, "@"); ok && !strings.HasPrefix(value, "@@") {
+		return id(wire.IDFqdn, rest)
 	}
 	if rest, ok := trimPrefix(value, "ipv4:"); ok {
 		if net.ParseIP(rest).To4() == nil {

@@ -22,91 +22,8 @@ import (
 
 	swan "swan"
 	"swan/events"
+	"swan4-tests/wiretest"
 )
-
-// udpWire adapts a connected UDP socket (*net.UDPConn implements
-// Read/Write/Close on datagrams) into the swan byte-stream wire format.
-type udpWire struct {
-	conn *net.UDPConn
-	hex  *bool
-
-	// writeBuf accumulates the stream until complete frames can be sent.
-	writeBuf []byte
-	// readBuf holds the current frame being delivered to Read callers.
-	readBuf []byte
-	readOff int
-}
-
-func newUDPWire(server string, hex *bool) (*udpWire, error) {
-	addr, err := net.ResolveUDPAddr("udp", server)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", server, err)
-	}
-	var laddr *net.UDPAddr
-	if addr.IP.IsLoopback() {
-		if addr.IP.To4() != nil {
-			laddr = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}
-		} else {
-			laddr = &net.UDPAddr{IP: net.IPv6loopback}
-		}
-	}
-	conn, err := net.DialUDP("udp", laddr, addr)
-	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", server, err)
-	}
-	return &udpWire{conn: conn, hex: hex}, nil
-}
-
-// Read serves one stream byte at a time from the current frame; when the
-// frame is exhausted the next UDP datagram is fetched and re-framed.
-func (w *udpWire) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	for w.readOff == len(w.readBuf) {
-		buf := make([]byte, 65535)
-		n, err := w.conn.Read(buf)
-		if err != nil {
-			return 0, err
-		}
-		// Stream frame: u16 big-endian length + datagram payload.
-		if w.hex != nil && *w.hex {
-			fmt.Printf("wire recv %d: %x\n", n, buf[:n])
-		}
-		w.readBuf = make([]byte, 2+n)
-		w.readBuf[0] = byte(n >> 8)
-		w.readBuf[1] = byte(n)
-		copy(w.readBuf[2:], buf[:n])
-		w.readOff = 0
-	}
-	n := copy(p, w.readBuf[w.readOff:])
-	w.readOff += n
-	return n, nil
-}
-
-// Write buffers stream bytes and emits every complete frame as one UDP
-// datagram to the connected peer.
-func (w *udpWire) Write(p []byte) (int, error) {
-	w.writeBuf = append(w.writeBuf, p...)
-	off := 0
-	for len(w.writeBuf)-off >= 2 {
-		length := int(w.writeBuf[off])<<8 | int(w.writeBuf[off+1])
-		if len(w.writeBuf)-off < 2+length {
-			break
-		}
-		if w.hex != nil && *w.hex {
-			fmt.Printf("wire send %d: %x\n", length, w.writeBuf[off+2:off+2+length])
-		}
-		if _, err := w.conn.Write(w.writeBuf[off+2 : off+2+length]); err != nil {
-			return 0, err
-		}
-		off += 2 + length
-	}
-	w.writeBuf = append(w.writeBuf[:0], w.writeBuf[off:]...)
-	return len(p), nil
-}
-
-func (w *udpWire) Close() error { return w.conn.Close() }
 
 func main() {
 	var (
@@ -115,7 +32,7 @@ func main() {
 		eapPass  = flag.String("eap-pass", "testpassword", "EAP/MSCHAPv2 password")
 		eventLog = flag.Bool("event-log", true, "print session events and packet summaries")
 		hexDump  = flag.Bool("hex-dump", false, "hex-dump raw wire datagrams")
-		ikeSpec  = flag.String("ike-spec", "aes256gcm16-prfsha512-curve25519", "IKE proposal (MVP default; local container uses aes256-sha512-prfsha512-curve25519)")
+		ikeSpec  = flag.String("ike-spec", "aes256gcm16-prfsha512-curve25519", "IKE proposal")
 		espSpec  = flag.String("esp-spec", "aes256gcm16-prfsha512-curve25519", "ESP proposal")
 	)
 	flag.Parse()
@@ -130,7 +47,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	wire, err := newUDPWire(*server, hexDump)
+	wire, err := wiretest.NewUDPWire(*server, hexDump)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wire:", err)
 		os.Exit(1)
@@ -183,6 +100,9 @@ func main() {
 	stopEvents := make(chan struct{})
 	defer close(stopEvents)
 	go func() {
+		if !*eventLog {
+			return
+		}
 		stream := session.Events()
 		defer stream.Close()
 		for {

@@ -24,12 +24,16 @@
 //
 // # Workers
 //
-//   - RxWorker: one blocking reader that owns the read buffers.
-//     Classified packets are handed to the ctl and esp channels with
-//     ownership transfer (consumer releases pooled buffers).
+//   - RxWorker: one blocking reader goroutine that owns the read buffers.
+//     Classified ctl packets are handed to the ctl channel singly; ESP
+//     packets are accumulated into batches and handed to the esp channel
+//     as one slice per batch. Ownership transfers to the consumer
+//     (consumer releases pooled buffers).
 //   - TxWorker: the single writer of the session. All producers (control
 //     handshake/running, esp outbound) submit *Frame values; the worker
-//     adds framing and may apply the non-ESP marker for IKE.
+//     adds framing, may apply the non-ESP marker for IKE, and coalesces
+//     consecutive queued frames into one stream Write while preserving
+//     FIFO order.
 //
 // Only these two workers touch the wire.
 package transport

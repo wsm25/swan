@@ -146,6 +146,10 @@ type Method interface {
 	// IKE envelope) and computes the next step. round is the IKE_AUTH
 	// message-id of the round and may be used by inner methods.
 	Handle(packet []byte, round uint16) (Result, error)
+	// Close releases per-session resources (TLS engines, goroutines) once
+	// the control layer knows no further Handle calls will arrive. It is
+	// safe to call multiple times.
+	Close() error
 }
 
 // Config selects an EAP method and supplies credentials. Defined here (a

@@ -163,10 +163,11 @@ const (
 	ConfigTypeRequest = 1
 	ConfigTypeReply   = 2
 
-	ConfigAttrInternalIPv4Address = 1
-	ConfigAttrInternalIPv4DNS     = 3
-	ConfigAttrInternalIPv6Address = 8
-	ConfigAttrInternalIPv6DNS     = 10
+	ConfigAttrInternalIPv4Address   = 1
+	ConfigAttrInternalIPv4DNS       = 3
+	ConfigAttrInternalAddressExpiry = 5
+	ConfigAttrInternalIPv6Address   = 8
+	ConfigAttrInternalIPv6DNS       = 10
 )
 
 // Traffic selector types (RFC 7296 3.13).

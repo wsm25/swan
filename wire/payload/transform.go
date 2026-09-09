@@ -25,8 +25,12 @@ type Proposal struct {
 }
 
 // AppendTransform appends one transform substructure; last controls the
-// chain marker (TransformChainLast vs TransformChainMore).
+// chain marker (TransformChainLast vs TransformChainMore). Attribute areas
+// that overflow the wire length field fail hard (panic).
 func AppendTransform(dst []byte, t Transform, last bool) []byte {
+	if TransformHeaderLen+len(t.Attrs) > 0xFFFF {
+		panic(fmt.Sprintf("swan/payload: transform length %d exceeds wire limit 65535", TransformHeaderLen+len(t.Attrs)))
+	}
 	start := len(dst)
 	dst = append(dst, 0, 0, 0, 0, byte(t.Type), 0, 0, 0)
 	if last {
@@ -61,12 +65,23 @@ func ParseTransform(b []byte) (Transform, []byte, error) {
 
 // AppendProposal appends one proposal header plus its transform bodies;
 // more controls the proposal chain marker (ProposalChainMore / last).
+// SPI chunks longer than 255, more than 255 transforms, or proposal bodies
+// exceeding the wire length field fail hard (panic).
 func AppendProposal(dst []byte, p Proposal, more bool) []byte {
+	if len(p.SPI) > 255 {
+		panic(fmt.Sprintf("swan/payload: proposal SPI length %d exceeds wire limit 255", len(p.SPI)))
+	}
+	if len(p.Transforms) > 255 {
+		panic(fmt.Sprintf("swan/payload: %d proposal transforms exceed the wire limit 255", len(p.Transforms)))
+	}
 	transformLen := 0
 	for i := range p.Transforms {
 		transformLen += TransformHeaderLen + len(p.Transforms[i].Attrs)
 	}
 	total := ProposalHeaderLen + len(p.SPI) + transformLen
+	if total > 0xFFFF {
+		panic(fmt.Sprintf("swan/payload: proposal length %d exceeds wire limit 65535", total))
+	}
 
 	start := len(dst)
 	dst = append(dst, 0, 0, 0, 0, p.Num, p.ProtocolID, byte(len(p.SPI)), byte(len(p.Transforms)))

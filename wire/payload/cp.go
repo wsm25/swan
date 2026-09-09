@@ -80,6 +80,9 @@ func AppendConfigRequest(dst []byte) []byte {
 }
 
 func appendConfigAttribute(dst []byte, attr ConfigAttribute) []byte {
+	if len(attr.Value) > 0xFFFF {
+		panic(fmt.Sprintf("swan/payload: configuration attribute value %d exceeds wire limit 65535", len(attr.Value)))
+	}
 	start := len(dst)
 	dst = append(dst, 0, 0, 0, 0)
 	putUint16(dst[start:start+2], attr.Type)

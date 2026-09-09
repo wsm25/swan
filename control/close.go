@@ -45,13 +45,16 @@ func (c *Control) buildChildDelete(msgID uint32, spi uint32) ([]*transport.Frame
 		ProtocolID: wire.DeleteProtocolESP,
 		SPIs:       []uint32{spi},
 	})
-	return buildProtectedState(c.cfg, c.state, wire.ExchangeInformational, msgID, wire.PayloadTypeDelete, body)
+	// The encrypted inner chain carries the generic 4-byte payload header in
+	// front of every body; a bare DELETE body would parse as garbage on the
+	// peer (and in our own ParsePayloads).
+	return buildProtectedState(c.cfg, c.state, wire.ExchangeInformational, msgID, wire.PayloadTypeDelete, cepSinglePayload(body))
 }
 
 // buildIKEDelete builds the final IKE DELETE request (no SPIs).
 func (c *Control) buildIKEDelete(msgID uint32) ([]*transport.Frame, error) {
 	body := payload.AppendDelete(nil, payload.Delete{ProtocolID: wire.DeleteProtocolIKE})
-	return buildProtectedState(c.cfg, c.state, wire.ExchangeInformational, msgID, wire.PayloadTypeDelete, body)
+	return buildProtectedState(c.cfg, c.state, wire.ExchangeInformational, msgID, wire.PayloadTypeDelete, cepSinglePayload(body))
 }
 
 // runDeleteExchange drives one request/reply DELETE round with the shared
@@ -88,6 +91,9 @@ func (c *Control) Close(ctx context.Context, tx chan<- *transport.Frame) (CloseO
 		return CloseAlreadyClosed, nil
 	}
 
+	if c.state.NextRequestMessageID == ^uint32(0) {
+		return CloseAlreadyClosed, fmt.Errorf("control: outbound message-id counter wrapped")
+	}
 	if c.state.ActiveChild != nil {
 		msgID := c.state.NextRequestMessageID
 		c.state.NextRequestMessageID++
@@ -100,6 +106,9 @@ func (c *Control) Close(ctx context.Context, tx chan<- *transport.Frame) (CloseO
 		}
 	}
 
+	if c.state.NextRequestMessageID == ^uint32(0) {
+		return CloseAlreadyClosed, fmt.Errorf("control: outbound message-id counter wrapped")
+	}
 	msgID := c.state.NextRequestMessageID
 	c.state.NextRequestMessageID++
 	packets, err := c.buildIKEDelete(msgID)

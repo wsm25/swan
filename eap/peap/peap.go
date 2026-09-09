@@ -93,6 +93,18 @@ func (m *Method) Initialize() error {
 	return m.reset()
 }
 
+// Close implements eap.Method: releases the TLS engine (relay goroutine,
+// channels, pipe ends) and makes the FSM terminal until the next
+// Initialize. It is safe to call multiple times and before Initialize.
+func (m *Method) Close() error {
+	if m.tls != nil {
+		err := m.tls.Close()
+		m.tls = nil
+		return err
+	}
+	return nil
+}
+
 // Handle implements eap.Method: one PEAP packet per call, threading phases
 // per the package doc. Any error flips the FSM into PhaseFailed.
 func (m *Method) Handle(packet []byte, round uint16) (eap.Result, error) {
@@ -117,11 +129,15 @@ func (m *Method) handleInner(packet []byte, round uint16) (eap.Result, error) {
 	}
 
 	// Parse PEAP request shape first; terminal outer packets are handled
-	// per phase below.
+	// per phase below. Uninitialized methods reject everything here before
+	// touching FSM-owned fragmenters (the worker always initializes first).
 	var (
 		peap    *peapRequest
 		peapErr error
 	)
+	if m.pendingOut == nil || m.pendingIn == nil {
+		return eap.Result{}, errors.New("peap method was not initialized")
+	}
 	if outer.Code == eap.CodeRequest && outer.Type == eap.TypePEAP {
 		peap, peapErr = parsePeapRequest(outer.Identifier, outer.Data)
 		if peapErr != nil {

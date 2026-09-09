@@ -42,6 +42,30 @@ const (
 type Frame struct {
 	Kind    Kind
 	Payload []byte
+
+	release func()
+}
+
+// SetRelease attaches an optional release hook to the frame. TxWorker calls
+// Release exactly once after the frame bytes have been consumed (on both
+// success and error paths). Frames without a hook (all control-plane
+// frames, which are reused for retransmits) are unaffected.
+func (f *Frame) SetRelease(release func()) {
+	if f != nil {
+		f.release = release
+	}
+}
+
+// Release invokes the release hook once. It is a no-op for frames without a
+// hook; hooked frames have their payload cleared so a use-after-release
+// fails immediately instead of observing recycled bytes.
+func (f *Frame) Release() {
+	if f == nil || f.release == nil {
+		return
+	}
+	f.release()
+	f.release = nil
+	f.Payload = nil
 }
 
 // Packet is a classified inbound datagram. The payload is exclusive to the

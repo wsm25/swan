@@ -35,6 +35,18 @@ type Established struct {
 	IKEKeys   *xcrypto.IKEKeys
 	ChildKeys *xcrypto.ChildKeys
 	Selection *xcrypto.Selection
+
+	// Arm starts the Running actor's serving loop. The facade calls it
+	// AFTER emitting HandshakeCompleted/ConfigAssigned/Started, so Running
+	// terminal events can never reorder before the success sequence.
+	Arm func()
+	// Terminated receives the Running actor's exit value exactly once:
+	// nil = peer-initiated IKE delete (clean shutdown), ctx.Err() =
+	// session-driven teardown, anything else = fatal with a Broken event.
+	Terminated <-chan error
+	// ChildClosed is closed once when the peer deletes the active
+	// CHILD_SA; wire it into the ESP pipeline to stop the data plane.
+	ChildClosed <-chan struct{}
 }
 
 // New validates the configuration (after filling default timeouts/limits)
@@ -277,20 +289,27 @@ func (c *Control) runHandshake(ctx context.Context, in <-chan *transport.Packet,
 	st.Phase = PhaseRunning
 	st.HasExpectedResponse = false
 	st.ExpectedResponseMessageID = 0
-	running := &Running{state: st, events: h.events}
+	childClosed := make(chan struct{})
+	running := &Running{state: st, events: h.events, cfg: c.cfg, childClosed: childClosed}
+	armed := make(chan struct{})
+	terminated := make(chan error, 1)
 	go func() {
-		_ = running.Run(demuxCtx, controlMailbox, tx)
+		err := running.Run(demuxCtx, controlMailbox, tx, armed)
 		stopDemux()
+		terminated <- err
 	}()
 	h.emit(events.Event{Kind: events.EventStageChanged, Stage: events.StageRunning})
 
 	return &Established{
-		Assigned:  *st.Assigned,
-		Child:     *st.ActiveChild,
-		State:     st,
-		IKEKeys:   st.IKEKeys,
-		ChildKeys: childKeys,
-		Selection: st.SelectedESP,
+		Assigned:    *st.Assigned,
+		Child:       *st.ActiveChild,
+		State:       st,
+		IKEKeys:     st.IKEKeys,
+		ChildKeys:   childKeys,
+		Selection:   st.SelectedESP,
+		Arm:         func() { close(armed) },
+		Terminated:  terminated,
+		ChildClosed: childClosed,
 	}, nil
 }
 
@@ -527,7 +546,7 @@ func (h *Handshake) buildAuthFailedNotify() ([]*transport.Frame, error) {
 	}
 	msgID := h.state.NextRequestMessageID
 	h.state.NextRequestMessageID++
-	return h.buildProtected(exchange, msgID, wire.PayloadTypeNotify, notifyBody)
+	return h.buildProtected(exchange, msgID, wire.PayloadTypeNotify, cepSinglePayload(notifyBody))
 }
 
 // invalidKEDHGroup extracts the requested group from an INVALID_KE_PAYLOAD

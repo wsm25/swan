@@ -48,12 +48,20 @@ func (h *Handshake) buildProtected(exchange wire.ExchangeType, msgID uint32, nex
 	if h != nil {
 		state = h.state
 	}
-	return buildProtectedState(cfg, state, exchange, msgID, nextPayload, plaintext)
+	return buildProtectedStateAs(cfg, state, exchange, msgID, nextPayload, plaintext, wire.FlagInitiator)
 }
 
-// buildProtectedState is the package-level protected-message builder shared
-// by Handshake, Running and the close sequence. cfg may be nil (defaults).
+// buildProtectedState is the package-level protected-message builder for
+// initiator-flagged requests, shared by Handshake, Running and the close
+// sequence. cfg may be nil (defaults).
 func buildProtectedState(cfg *Config, state *State, exchange wire.ExchangeType, msgID uint32, nextPayload wire.PayloadType, plaintext []byte) ([]*transport.Frame, error) {
+	return buildProtectedStateAs(cfg, state, exchange, msgID, nextPayload, plaintext, wire.FlagInitiator)
+}
+
+// buildProtectedStateAs is buildProtectedState with an explicit header flag
+// set: FlagInitiator for requests, FlagResponse for replies to peer
+// requests.
+func buildProtectedStateAs(cfg *Config, state *State, exchange wire.ExchangeType, msgID uint32, nextPayload wire.PayloadType, plaintext []byte, flags wire.Flags) ([]*transport.Frame, error) {
 	if state == nil {
 		return nil, fmt.Errorf("control: missing SA state for protected build")
 	}
@@ -102,7 +110,7 @@ func buildProtectedState(cfg *Config, state *State, exchange wire.ExchangeType, 
 			}
 		}
 
-		frame, err := sealProtectedPacket(state, exchange, msgID, innerNext, encType, frag, part)
+		frame, err := sealProtectedPacket(state, exchange, msgID, innerNext, encType, frag, part, flags)
 		if err != nil {
 			return nil, err
 		}
@@ -114,7 +122,7 @@ func buildProtectedState(cfg *Config, state *State, exchange wire.ExchangeType, 
 // sealProtectedPacket builds one complete SK or SKF packet. The caller
 // passes one unpadded plaintext chunk; padding is applied here because each
 // SKF fragment is padded independently (swan2 push_encrypt semantics).
-func sealProtectedPacket(state *State, exchange wire.ExchangeType, msgID uint32, innerNext wire.PayloadType, encType wire.PayloadType, frag *wire.SkfHeader, plaintext []byte) (*transport.Frame, error) {
+func sealProtectedPacket(state *State, exchange wire.ExchangeType, msgID uint32, innerNext wire.PayloadType, encType wire.PayloadType, frag *wire.SkfHeader, plaintext []byte, flags wire.Flags) (*transport.Frame, error) {
 	sel := state.SelectedIKE
 	keys := state.IKEKeys
 	enc := sel.Encryption
@@ -144,7 +152,7 @@ func sealProtectedPacket(state *State, exchange wire.ExchangeType, msgID uint32,
 		NextPayload:  encType,
 		Version:      wire.IKEDefaultVersion,
 		ExchangeType: exchange,
-		Flags:        wire.FlagInitiator,
+		Flags:        flags,
 		MessageID:    msgID,
 	}
 	pkt := hdr.MarshalTo(nil)
@@ -269,6 +277,13 @@ func openProtectedRawState(cfg *Config, state *State, raw []byte) ([]wire.Payloa
 	if state == nil {
 		return nil, false, fmt.Errorf("control: missing SA state for protected open")
 	}
+	skfTimeout := time.Duration(0)
+	if cfg != nil && cfg.Timeouts.SkfReassemblyTimeout > 0 {
+		skfTimeout = cfg.Timeouts.SkfReassemblyTimeout
+	}
+	if skfTimeout <= 0 {
+		skfTimeout = SkfReassemblyTimeout
+	}
 	if state.SelectedIKE == nil || state.IKEKeys == nil {
 		return nil, false, fmt.Errorf("control: IKE cipher state missing for protected open")
 	}
@@ -342,7 +357,7 @@ func openProtectedRawState(cfg *Config, state *State, raw []byte) ([]wire.Payloa
 			if state.InboundFragments != nil {
 				fragFirst = state.InboundFragments.FirstInnerPayload
 			}
-			complete, joined, err := collectSKFragment(state, envelope, plain, hdr.MessageID, hdr.ExchangeType)
+			complete, joined, err := collectSKFragment(state, envelope, plain, hdr.MessageID, hdr.ExchangeType, skfTimeout)
 			if err != nil {
 				return nil, false, err
 			}
@@ -460,14 +475,18 @@ func (h *Handshake) collectFragment(enc *wire.EncryptedPayload, plain []byte, ms
 	if h == nil || h.state == nil {
 		return false, nil, fmt.Errorf("control: missing SA state for SKF reassembly")
 	}
-	return collectSKFragment(h.state, enc, plain, msgID, exchange)
+	timeout := SkfReassemblyTimeout
+	if h.cfg != nil && h.cfg.Timeouts.SkfReassemblyTimeout > 0 {
+		timeout = h.cfg.Timeouts.SkfReassemblyTimeout
+	}
+	return collectSKFragment(h.state, enc, plain, msgID, exchange, timeout)
 }
 
 // collectSKFragment applies the swan2 handle_skf rules: fragments must all
 // belong to the same exchange and message-id, a larger total-fragment count
 // resets the stored set, only fragment 1 may carry the inner first-payload,
 // and the stored set expires after SkfReassemblyTimeout.
-func collectSKFragment(state *State, enc *wire.EncryptedPayload, plain []byte, msgID uint32, exchange wire.ExchangeType) (complete bool, joined []byte, err error) {
+func collectSKFragment(state *State, enc *wire.EncryptedPayload, plain []byte, msgID uint32, exchange wire.ExchangeType, timeout time.Duration) (complete bool, joined []byte, err error) {
 	if enc == nil || enc.Type != wire.PayloadTypeSKF || !enc.Fragmented {
 		return false, nil, fmt.Errorf("control: collectFragment requires an SKF envelope")
 	}
@@ -506,7 +525,7 @@ func collectSKFragment(state *State, enc *wire.EncryptedPayload, plain []byte, m
 		}
 		state.InboundFragments = existing
 	}
-	existing.ExpiresAt = now.Add(SkfReassemblyTimeout)
+	existing.ExpiresAt = now.Add(timeout)
 
 	// An arriving fragment whose declared total is SMALLER than the table
 	// we are collecting against is ignored: swan2 keeps waiting for the

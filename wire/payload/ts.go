@@ -25,7 +25,13 @@ type TrafficSelectors struct {
 }
 
 // AppendTS serializes the TSi/TSr payload body (count header + entries).
+// It fails hard (panic) on inputs that cannot be represented on the wire:
+// more than 255 selectors, empty addresses, or start/end address widths
+// that do not match.
 func AppendTS(dst []byte, ts TrafficSelectors) []byte {
+	if len(ts.Selectors) > 255 {
+		panic(fmt.Sprintf("swan/payload: %d traffic selectors exceed the wire limit 255", len(ts.Selectors)))
+	}
 	start := len(dst)
 	dst = append(dst, byte(len(ts.Selectors)), 0, 0, 0)
 	_ = start
@@ -73,7 +79,12 @@ func addrLen(tsType uint8) (int, error) {
 }
 
 func appendTrafficSelector(dst []byte, s Selector) []byte {
-	width := len(ipOctets(s.StartAddr))
+	startWidth := len(ipOctets(s.StartAddr))
+	endWidth := len(ipOctets(s.EndAddr))
+	if startWidth == 0 || endWidth == 0 || startWidth != endWidth {
+		panic(fmt.Sprintf("swan/payload: traffic selector address width mismatch %d/%d", startWidth, endWidth))
+	}
+	width := startWidth
 	start := len(dst)
 	dst = append(dst, s.Type, s.ProtocolID, 0, 0, 0, 0, 0, 0)
 	putUint16(dst[start+2:start+4], uint16(TsEntryFixedLen+2*width))

@@ -135,6 +135,11 @@ type AssignedConfig struct {
 	InternalIPv6Prefix uint8
 	DNS4               []net.IP
 	DNS6               []net.IP
+	// AddressExpirySeconds is the CP lease lifetime from
+	// INTERNAL_ADDRESS_EXPIRY, zero when the responder did not send one.
+	// It is reported for the caller; renewing the lease is out of scope
+	// for this implementation.
+	AddressExpirySeconds uint32
 }
 
 // Checkpoint is an outbound request kept for retransmission.
@@ -191,6 +196,13 @@ func (s *State) ClearSession() {
 	s.InboundFragments = nil
 	s.Assigned = nil
 	s.LocalDH = nil
+	s.Auth.LocalEAPMSK = nil
+	s.Auth.FirstIDiPayload = nil
+	s.Auth.PeerIDr = nil
+	s.Auth.PeerSignatureHashAlgorithms = nil
+	s.Auth.PeerCerts = nil
+	s.SAInitRequest = nil
+	s.SAInitResponse = nil
 	s.HasExpectedResponse = false
 	s.HasLastCompletedResponse = false
 	s.FirstIKEAuthSeen = false

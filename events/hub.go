@@ -114,11 +114,14 @@ type Hub struct {
 //	isEmit        => deliver event to every subscriber
 //	reply != nil  => subscribe: return a Stream preloaded with the replay
 //	stream != nil => unsubscribe: drop the subscriber reference
+//	done != nil   => synchronous emit: closed once the event was processed
+//	                (delivered or dropped by mailbox overflow)
 type hubReq struct {
 	event  Event
 	reply  chan *Stream
 	stream *Stream
 	isEmit bool
+	done   chan struct{}
 }
 
 // NewHub builds the hub and starts its goroutine. queue is the per
@@ -158,6 +161,9 @@ func (h *Hub) run() {
 }
 
 func (h *Hub) handle(req hubReq) {
+	if req.done != nil {
+		defer close(req.done)
+	}
 	switch {
 	case req.isEmit:
 		h.dispatch(req.event)
@@ -262,10 +268,33 @@ func (h *Hub) Emit(e Event) {
 	}
 }
 
+// EmitSync publishes one event and blocks until the hub worker has
+// processed it (delivered it to every subscriber's mailbox or dropped it
+// because a mailbox was full). Returns false if the hub is shutting down.
+// Used for terminal events so teardown can close the hub right after.
+func (h *Hub) EmitSync(e Event) bool {
+	if h == nil {
+		return false
+	}
+	done := make(chan struct{})
+	select {
+	case h.mailbox <- hubReq{event: e, isEmit: true, done: done}:
+	case <-h.stopped:
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-h.stopped:
+		return false
+	}
+}
+
 // Subscribe registers a new stream: the caller first receives the replay
 // history, then live events (no duplicates). Subscriptions may be closed
 // freely; disconnect never affects the hub. After Hub.Close a subscription
-// returns nil and never blocks.
+// returns nil and never blocks, including the linearization window where
+// the mailbox send and the hub shutdown race.
 func (h *Hub) Subscribe() *Stream {
 	if h == nil {
 		return nil
@@ -276,10 +305,18 @@ func (h *Hub) Subscribe() *Stream {
 		return nil
 	default:
 	}
-	// Linearize with Close: once the mailbox send is performed the hub
-	// worker or its post-stop drain replies exactly once, and selecting on
-	// stopped below covers the shutdown race.
-	h.mailbox <- hubReq{reply: reply}
+	select {
+	case h.mailbox <- hubReq{reply: reply}:
+	case <-h.stopped:
+		// The hub worker may still drain our request; never leave the
+		// reply channel unconsumed.
+		select {
+		case s := <-reply:
+			return s
+		default:
+			return nil
+		}
+	}
 	select {
 	case s := <-reply:
 		return s

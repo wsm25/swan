@@ -19,8 +19,12 @@ type Notify struct {
 }
 
 // AppendNotify serializes the NOTIFY payload body from plain fields;
-// spiSize is derived from the protocol id and len(SPI).
+// spiSize is derived from the protocol id and len(SPI). SPI lengths that
+// exceed the wire field (255) fail hard (panic).
 func AppendNotify(dst []byte, n Notify) []byte {
+	if len(n.SPI) > 255 {
+		panic(fmt.Sprintf("swan/payload: notify SPI length %d exceeds wire limit 255", len(n.SPI)))
+	}
 	start := len(dst)
 	dst = append(dst, n.ProtocolID, byte(len(n.SPI)), 0, 0)
 	putUint16(dst[start+2:start+4], uint16(n.Type))

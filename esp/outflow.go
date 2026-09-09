@@ -4,9 +4,17 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 
+	"swan/transport"
 	"swan/xcrypto"
 )
+
+// ErrSeqWrapped reports that the outbound sequence number reached zero:
+// RFC 4303 forbids cycling the counter, and the sender must stop and rekey
+// instead of reusing sequence numbers. It is sticky for the lifetime of the
+// Outbound.
+var ErrSeqWrapped = errors.New("swan/esp: ESP sequence number wrapped after 2^32-1 packets")
 
 // OutboundConfig freezes the per-SA read-only state handed to the outbound
 // worker at establishment.
@@ -17,19 +25,45 @@ type OutboundConfig struct {
 	Keys      *xcrypto.ChildKeys
 }
 
+// outboundPoolBufSize is the initial ESP datagram backing class size. Larger
+// jumbo datagrams replace the pooled slice; Put still recycles the larger
+// backing array (the pool simply adapts upwards, exactly like the rx pool).
+const outboundPoolBufSize = 4096
+
+// outboundDatagram carries the pooled ESP datagram backing. The slice length
+// is recovered from the datagram handed to the transport writer.
+type outboundDatagram struct {
+	b []byte
+}
+
 // Outbound encrypts raw IP packets into UDP-encapsulated ESP datagrams.
 // Sequence numbers are allocated strictly in order by this single worker
 // (starting at 1; wrap is an error, per RFC 4303).
 type Outbound struct {
 	cfg OutboundConfig
 
-	seq uint32
+	seq      uint32
+	wrapped  bool
+	enc      *xcrypto.PreparedEncryption
+	integ    *xcrypto.PreparedIntegrity
+	stateErr error
+
+	// plain/iv are process-local scratch buffers; they never alias a
+	// returned datagram after Process returns.
+	plain []byte
+	iv    []byte
+
+	pool sync.Pool
 }
 
 // NewOutbound binds the frozen configuration with the sequence number at
-// its RFC 4303 initial value of 1.
+// its RFC 4303 initial value of 1. Reusable keyed cipher state is prepared
+// here; any preparation failure is reported by Process.
 func NewOutbound(cfg OutboundConfig) *Outbound {
-	return &Outbound{cfg: cfg, seq: 1}
+	p := &Outbound{cfg: cfg, seq: 1}
+	p.pool = sync.Pool{New: func() any { return &outboundDatagram{b: make([]byte, outboundPoolBufSize)} }}
+	p.enc, p.integ, p.stateErr = prepareOutbound(cfg)
+	return p
 }
 
 // Process pads/encrypts one raw IP packet and returns the ESP datagram
@@ -37,16 +71,32 @@ func NewOutbound(cfg OutboundConfig) *Outbound {
 // IPv4/IPv6 are translated to the ESP next-header values 4/41; other
 // versions are rejected.
 func (p *Outbound) Process(packet []byte) (datagram []byte, err error) {
-	if err := p.validateConfig(); err != nil {
-		return nil, err
+	datagram, _, err = p.process(packet, false)
+	return datagram, err
+}
+
+// process is the shared encrypt path. pooled selects a transport-releasable
+// datagram backing (used by the pipeline); the public Process uses ordinary
+// GC memory so its existing contract needs no release hook.
+func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
+	if p != nil && p.wrapped {
+		// Stick to the fatal error: no packet may ever be sent again on
+		// this SA once the counter cycled.
+		return nil, nil, ErrSeqWrapped
+	}
+	if p == nil || p.stateErr != nil {
+		if p == nil {
+			return nil, nil, errors.New("swan/esp: outbound configuration is incomplete")
+		}
+		return nil, nil, p.stateErr
 	}
 	if len(packet) == 0 {
-		return nil, errors.New("swan/esp: outbound packet is empty")
+		return nil, nil, errors.New("swan/esp: outbound packet is empty")
 	}
 
 	nextHeader, err := ipNextHeader(packet[0])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	enc := p.cfg.Selection.Encryption
@@ -57,54 +107,115 @@ func (p *Outbound) Process(packet []byte) (datagram []byte, err error) {
 	// (payload + padding + trailer) must be a multiple of the cipher block
 	// size: 16 for CBC, 1 for AEAD (no padding).
 	padLen := (enc.BlockLen - (len(packet)+2)%enc.BlockLen) % enc.BlockLen
-	plain := make([]byte, 0, len(packet)+padLen+2)
+	plainRequired := len(packet) + padLen + 2
+	if cap(p.plain) < plainRequired {
+		p.plain = make([]byte, plainRequired)
+	}
+	plain := p.plain[:0]
 	plain = append(plain, packet...)
 	for i := 1; i <= padLen; i++ {
 		plain = append(plain, byte(i))
 	}
 	plain = append(plain, byte(padLen), nextHeader)
 
-	iv := make([]byte, enc.IVLen)
+	if cap(p.iv) < enc.IVLen {
+		p.iv = make([]byte, enc.IVLen)
+	}
+	iv := p.iv[:enc.IVLen]
 	if err := xcrypto.Fill(iv); err != nil {
-		return nil, fmt.Errorf("swan/esp: generate ESP IV: %w", err)
+		return nil, nil, fmt.Errorf("swan/esp: generate ESP IV: %w", err)
 	}
 
 	if p.seq == 0 {
-		return nil, errors.New("swan/esp: ESP sequence number wrapped")
+		p.wrapped = true
+		return nil, nil, ErrSeqWrapped
 	}
 	seq := p.seq
 	p.seq++
 
-	hdr := make([]byte, espHeaderLen, espHeaderLen+enc.IVLen+len(plain)+enc.ICVLen+integOuterICV(integ))
-	binary.BigEndian.PutUint32(hdr[:4], p.cfg.SPI)
-	binary.BigEndian.PutUint32(hdr[4:8], seq)
-
-	ciphertext, err := enc.Seal(p.cfg.Keys.SKei, iv, hdr[:espHeaderLen], plain)
-	if err != nil {
-		return nil, fmt.Errorf("swan/esp: encrypt ESP: %w", err)
+	// The transport length prefix is 16-bit; reject frames that could not
+	// be written before allocating/sealing. A silent oversized write would
+	// otherwise kill the shared Tx worker underneath the caller.
+	trailerICV := integOuterICV(integ)
+	if enc.AEAD {
+		trailerICV = enc.ICVLen
 	}
-	hdr = append(hdr, iv...)
-	hdr = append(hdr, ciphertext...)
+	wireLen := espHeaderLen + enc.IVLen + len(plain) + trailerICV
+	if wireLen > transport.MaxFramePayload {
+		return nil, nil, fmt.Errorf("swan/esp: encapsulated packet %d bytes exceeds transport limit %d", wireLen, transport.MaxFramePayload)
+	}
+
+	var (
+		datagram []byte
+		release  func()
+	)
+	if pooled {
+		datagram, release = p.allocDatagram(wireLen)
+	} else {
+		datagram = make([]byte, wireLen)
+	}
+	fail := func(err error) ([]byte, func(), error) {
+		if release != nil {
+			release()
+		}
+		return nil, nil, err
+	}
+
+	binary.BigEndian.PutUint32(datagram[:4], p.cfg.SPI)
+	binary.BigEndian.PutUint32(datagram[4:8], seq)
+	copy(datagram[espHeaderLen:espHeaderLen+enc.IVLen], iv)
+
+	datagram, err = p.enc.SealTo(datagram[:espHeaderLen+enc.IVLen], iv, datagram[:espHeaderLen], plain)
+	if err != nil {
+		return fail(fmt.Errorf("swan/esp: encrypt ESP: %w", err))
+	}
 
 	if !enc.AEAD {
-		if integ == nil {
-			return nil, errors.New("swan/esp: CBC requires an integrity transform")
+		if p.integ == nil {
+			return fail(errors.New("swan/esp: CBC requires an integrity transform"))
 		}
-		icv, err := integ.Sign(p.cfg.Keys.SKai, hdr)
+		icv, err := p.integ.Sign(datagram)
 		if err != nil {
-			return nil, fmt.Errorf("swan/esp: sign ESP ICV: %w", err)
+			return fail(fmt.Errorf("swan/esp: sign ESP ICV: %w", err))
 		}
-		hdr = append(hdr, icv...)
+		datagram = append(datagram, icv...)
 	}
 
-	return hdr, nil
+	return datagram, release, nil
 }
 
-func (p *Outbound) validateConfig() error {
-	if p == nil || p.cfg.Selection == nil || p.cfg.Selection.Encryption == nil || p.cfg.Keys == nil {
-		return errors.New("swan/esp: outbound configuration is incomplete")
+// allocDatagram carves an ESP datagram out of the outbound pool and returns
+// the release hook that puts its whole backing array back.
+func (p *Outbound) allocDatagram(n int) ([]byte, func()) {
+	ob := p.pool.Get().(*outboundDatagram)
+	if cap(ob.b) < n {
+		ob.b = make([]byte, n)
 	}
-	return nil
+	return ob.b[:n], func() { p.pool.Put(ob) }
+}
+
+// prepareOutbound builds the keyed cipher states the outbound worker reuses
+// for the lifetime of the CHILD_SA.
+func prepareOutbound(cfg OutboundConfig) (*xcrypto.PreparedEncryption, *xcrypto.PreparedIntegrity, error) {
+	if cfg.Selection == nil || cfg.Selection.Encryption == nil || cfg.Keys == nil {
+		return nil, nil, errors.New("swan/esp: outbound configuration is incomplete")
+	}
+	enc := cfg.Selection.Encryption
+	state, err := enc.Prepare(cfg.Keys.SKei)
+	if err != nil {
+		return nil, nil, fmt.Errorf("swan/esp: prepare ESP encryption: %w", err)
+	}
+	var integ *xcrypto.PreparedIntegrity
+	if !enc.AEAD {
+		if cfg.Selection.Integrity == nil {
+			return nil, nil, errors.New("swan/esp: CBC requires an integrity transform")
+		}
+		integ, err = cfg.Selection.Integrity.Prepare(cfg.Keys.SKai)
+		if err != nil {
+			return nil, nil, fmt.Errorf("swan/esp: prepare ESP integrity: %w", err)
+		}
+	}
+	return state, integ, nil
 }
 
 // ipNextHeader maps the IP version nibble to the ESP trailer next-header

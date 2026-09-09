@@ -1,6 +1,7 @@
 # ---- tests ----
 /tests/client/swan4-tests
 /tests/docker/certs/
+/tests/udpsink/udpsink
 
 *.test
 *.out
@@ -15,3 +16,5 @@ coverage.*
 .DS_Store
 *.log
 *.tmp
+/.tmp/
+/tests/udpsink/swan4-udpsink

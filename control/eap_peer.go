@@ -77,6 +77,13 @@ func (w *eapPeerWorker) waitInit() error {
 
 func (w *eapPeerWorker) run(ctx context.Context) {
 	defer close(w.done)
+	defer func() {
+		// Release per-session method resources whatever the exit reason:
+		// completion, failure, ctx cancel or a closed rounds mailbox.
+		if w.method != nil {
+			_ = w.method.Close()
+		}
+	}()
 
 	if err := w.method.Initialize(); err != nil {
 		w.initDone <- fmt.Errorf("swan/control: initialize eap method %s: %w", w.method.Name(), err)

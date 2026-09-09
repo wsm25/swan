@@ -607,6 +607,10 @@ func cesDecodeAssigned(b []byte) (*AssignedConfig, error) {
 				return nil, fmt.Errorf("control: invalid INTERNAL_IP6_DNS length %d", len(attr.Value))
 			}
 			out.DNS6 = append(out.DNS6, append(net.IP(nil), attr.Value...))
+		case wire.ConfigAttrInternalAddressExpiry:
+			if len(attr.Value) == 4 {
+				out.AddressExpirySeconds = uint32(attr.Value[0])<<24 | uint32(attr.Value[1])<<16 | uint32(attr.Value[2])<<8 | uint32(attr.Value[3])
+			}
 		}
 	}
 	return out, nil

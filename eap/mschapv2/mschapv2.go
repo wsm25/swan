@@ -120,9 +120,13 @@ func (m *Method) Initialize() error {
 // Handle implements eap.Method: Identity -> identity response, foreign
 // request -> NAK, challenge/verify round -> RFC 2759 response, Success
 // after a verified challenge -> Completed with exported MSK, Failure ->
-// Failed.
+// Failed. Once Failed the FSM rejects every further packet until a new
+// Initialize.
 func (m *Method) Handle(packet []byte, round uint16) (eap.Result, error) {
 	_ = round
+	if m.phase == PhaseFailed {
+		return eap.Result{}, errors.New("mschapv2 method is in failure state")
+	}
 	pkt, err := eap.Parse(packet)
 	if err != nil {
 		m.phase = PhaseFailed
@@ -178,6 +182,14 @@ func (m *Method) Handle(packet []byte, round uint16) (eap.Result, error) {
 func (m *Method) reset() {
 	m.phase = PhaseNegotiating
 	m.state = nil
+}
+
+// Close implements eap.Method: drops challenge state and makes the FSM
+// terminal; a later Initialize resets it.
+func (m *Method) Close() error {
+	m.state = nil
+	m.phase = PhaseFailed
+	return nil
 }
 
 // onRequest processes one MSCHAPv2 request payload (the bytes after the EAP
@@ -269,7 +281,9 @@ func (m *Method) onRequest(eapID uint8, payload []byte) ([]byte, error) {
 		if err := parseFailureTokens(data); err != nil {
 			return nil, err
 		}
-		m.state.expectingSuccess = false
+		// Fail closed: no further Success packet may export an MSK after
+		// the server rejected the challenge.
+		m.state = nil
 		return nil, errors.New("inner mschapv2 authentication failed")
 
 	default:

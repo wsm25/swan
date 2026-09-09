@@ -97,6 +97,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			round.Reply <- RoundResult{Result: result}
 			if result.Action == ActionComplete {
 				completed = true
+				// Release per-session method resources (e.g. the PEAP TLS
+				// engine) as soon as the method cannot produce more steps.
+				_ = w.method.Close()
 			}
 		}
 	}
