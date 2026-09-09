@@ -54,7 +54,7 @@ func (h *Handshake) Run(ctx context.Context, in <-chan *transport.Packet, tx cha
 	return c.Run(ctx, in, tx)
 }
 
-// emit posts one event onto the hub; the hub is non-blocking by contract.
+// emit posts one event onto the hub. The hub's Emit call is non-blocking.
 func (h *Handshake) emit(ev events.Event) {
 	if h == nil || h.events == nil {
 		return

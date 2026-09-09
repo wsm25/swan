@@ -77,7 +77,7 @@ func (p *Outbound) Process(packet []byte) (datagram []byte, err error) {
 
 // process is the shared encrypt path. pooled selects a transport-releasable
 // datagram backing (used by the pipeline); the public Process uses ordinary
-// GC memory so its existing contract needs no release hook.
+// GC memory and therefore returns no release hook.
 func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
 	if p != nil && p.wrapped {
 		// Stick to the fatal error: no packet may ever be sent again on

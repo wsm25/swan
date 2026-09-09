@@ -12,12 +12,12 @@ import (
 // Tunnel is the established data plane, exposed as a raw IP packet
 // io.ReadWriteCloser.
 //
-// Read contract: every call returns data from at most one decrypted IP
+// Read behavior: every call returns data from at most one decrypted IP
 // packet; packets are never merged across reads. If the caller's buffer is
 // smaller than the packet the remainder of the same packet is returned on
 // later calls. The returned bytes are a copy owned by the caller.
 //
-// Write contract: one call carries exactly one raw IP packet; the packet is
+// Write behavior: one call carries exactly one raw IP packet; the packet is
 // copied, ESP-encrypted by the outbound worker and written to the wire by
 // the transport worker. A full bounded queue blocks the caller
 // (backpressure).

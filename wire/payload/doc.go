@@ -1,13 +1,15 @@
 // Package payload contains one encoder/decoder pair per IKEv2 payload body.
 //
 // Conventions:
-//   - Append* functions write into a caller-provided buffer (append-style,
-//     no allocation unless the buffer grows) and return the extended slice.
-//   - Parse* functions take a payload body (generic payload header already
-//     removed by swan/wire) and return parsed values plus any remaining
-//     bytes; every length is bounds-checked before use.
-//   - No function here encrypts, decrypts or negotiates anything; algorithm
-//     IDs are numeric.
+//
+//   - Append* functions write into a caller-provided buffer (append-style;
+//     they allocate only when the buffer grows) and return the extended
+//     slice.
+//   - Parse* functions take a payload body (the generic payload header is
+//     already removed by swan/wire) and return parsed values plus any
+//     remaining bytes. Every length is bounds-checked before use.
+//   - No function here encrypts, decrypts, or negotiates anything;
+//     algorithm IDs are numeric.
 package payload
 
 import "swan/wire"

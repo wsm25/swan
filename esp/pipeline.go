@@ -47,7 +47,7 @@ func (p *InboundPacket) Release() {
 // channels to close; workers exit after the bounded queues they own drain.
 // After Run returns the workers have released the channels handed to them.
 //
-// Shutdown contract for the facade: cancel ctx (or close espIn/ipIn) first,
+// Shutdown order for the Session: cancel ctx (or close espIn/ipIn) first,
 // wait on Done, and only then close ipOut/tx. Otherwise a sender could
 // observe a closed receiver channel.
 type Pipeline struct {
@@ -63,7 +63,7 @@ type Pipeline struct {
 	// active CHILD_SA; both workers stop with it. nil disables the stop.
 	childClosed <-chan struct{}
 	// fatalOut receives at most one unrecoverable data-plane error (e.g.
-	// ESP sequence wrap); the facade turns it into Broken + teardown.
+	// ESP sequence wrap); the Session turns it into Broken + teardown.
 	fatalOut chan<- error
 
 	fatalOnce sync.Once
@@ -200,7 +200,7 @@ func (p *Pipeline) stopped(ctx context.Context) bool {
 // owned by the caller on success; ProcessPooled recycles its plaintext on
 // error, so there is nothing to release when err != nil.
 // reportFatal forwards the first unrecoverable data-plane error to the
-// facade exactly once and detaches the outbound worker.
+// public Session exactly once and detaches the outbound worker.
 func (p *Pipeline) reportFatal(err error) {
 	p.fatalOnce.Do(func() {
 		if p.fatalOut != nil {

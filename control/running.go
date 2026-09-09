@@ -38,15 +38,15 @@ type Running struct {
 	cfg    *Config
 
 	// childClosed is closed once when the peer deletes the active
-	// CHILD_SA; the facade routes it into the ESP pipeline so the data
-	// plane stops encrypting with the deleted SPI.
+	// CHILD_SA; the public Session routes it into the ESP pipeline so the
+	// data plane stops encrypting with the deleted SPI.
 	childClosed chan<- struct{}
 }
 
-// Run serves until ctx ends or the peer requests IKE_SA delete. armed gates
-// the loop until the facade has emitted HandshakeCompleted/ConfigAssigned/
-// Started, so terminal events from this actor can never reorder before the
-// documented success sequence. Return value: nil means the peer deleted the
+// Run serves until ctx ends or the peer requests IKE_SA delete. armed
+// holds the loop until the public Session has emitted
+// HandshakeCompleted/ConfigAssigned/Started, so terminal events from this
+// actor can never reorder before the success sequence. Return value: nil means the peer deleted the
 // IKE SA (clean shutdown, no Broken event); ctx.Err() means normal
 // teardown; every other error is fatal and already emitted as Broken.
 func (r *Running) Run(ctx context.Context, in <-chan *transport.Packet, tx chan<- *transport.Frame, armed <-chan struct{}) error {
@@ -289,10 +289,10 @@ func (r *Running) processInformational(ctx context.Context, tx chan<- *transport
 	r.rememberResponse(msg.Header.MessageID, frames)
 
 	if shutdown {
-		// Clean peer-initiated IKE delete: Run returns nil, the facade
-		// tears the session down. The event stream (Stopped, closed Done /
-		// Tunnel) is the facade's job, so exactly one ordered shutdown
-		// sequence is produced.
+		// Clean peer-initiated IKE delete: Run returns nil and the public
+		// Session tears the session down. The event stream (Stopped,
+		// closed Done / Tunnel) is the Session's job, so exactly one
+		// ordered shutdown sequence is produced.
 		r.state.ClearSession()
 		r.state.Phase = PhaseStopped
 	}
@@ -314,10 +314,9 @@ func openRunningPayloads(state *State, raw []byte, msg *wire.Message) ([]wire.Pa
 	return msg.Payloads, true, nil
 }
 
-// fail returns the original error without emitting: the facade (Session)
-// is the single Broken-event owner on the running path and wraps the same
-// error; a handful of duplicate Broken events would otherwise leak to
-// subscribers.
+// fail returns the original error without emitting: the public Session is
+// the single Broken-event owner on the running path and wraps the same
+// error; duplicate Broken events would otherwise reach subscribers.
 func (r *Running) fail(err error) error {
 	return err
 }

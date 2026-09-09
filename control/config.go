@@ -12,7 +12,7 @@ import (
 
 // Config is the protocol configuration consumed by the control plane. The
 // public swan.Config is decomposed into this layer-specific shape by the
-// facade.
+// Session.
 type Config struct {
 	// PeerIP / LocalIP feed NAT-D hashes and the transport address
 	// tracking. Ports are irrelevant here: NAT-D always uses the logical

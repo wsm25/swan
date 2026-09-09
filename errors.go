@@ -4,8 +4,8 @@ import "strings"
 
 // ErrorKind classifies failures surfaced by the library. Lower layers wrap
 // stdlib errors with precise context (section, offset, payload chain path);
-// the facade maps them onto these kinds so callers can switch without string
-// matching.
+// the public Session maps them onto these kinds so callers can switch
+// without string matching.
 type ErrorKind uint8
 
 const (

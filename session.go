@@ -43,7 +43,7 @@ type Session struct {
 	rightID payload.ID
 
 	// Channels between layers, created once so a failed Start can retry on
-	// the same hub. They are never closed by the facade; workers exit on
+	// the same hub. The public Session never closes them; workers exit on
 	// the session context instead.
 	ctlIn    chan *transport.Packet
 	espIn    chan []*transport.Packet

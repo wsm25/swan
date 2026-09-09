@@ -9,8 +9,8 @@ import (
 )
 
 // Batching constants for the data plane. Control-plane deliveries stay
-// single-frame: they are latency-sensitive and follow the existing
-// one-frame-at-a-time channel contract.
+// single-frame: they are latency-sensitive and keep the existing
+// one-frame-at-a-time channel behavior.
 const (
 	// rxBatch is the maximum number of ESP packets RxWorker accumulates
 	// before delivering one slice to the esp pipeline.

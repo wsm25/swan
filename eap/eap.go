@@ -153,8 +153,8 @@ type Method interface {
 }
 
 // Config selects an EAP method and supplies credentials. Defined here (a
-// flat struct) so swan/control and the root facade can share it without
-// importing the method packages.
+// flat struct) so swan/control and the root swan package can share it
+// without importing the method packages.
 type Config struct {
 	Method   string // "peap" | "mschapv2"
 	Identity string

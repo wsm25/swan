@@ -21,7 +21,7 @@ type Control struct {
 	events *events.Hub
 
 	// handshake is nil for a freshly built Control and pinned once the
-	// facade or Handshake.Run starts the linear actor.
+	// public Session or Handshake.Run starts the linear actor.
 	handshake *Handshake
 }
 
@@ -36,9 +36,10 @@ type Established struct {
 	ChildKeys *xcrypto.ChildKeys
 	Selection *xcrypto.Selection
 
-	// Arm starts the Running actor's serving loop. The facade calls it
-	// AFTER emitting HandshakeCompleted/ConfigAssigned/Started, so Running
-	// terminal events can never reorder before the success sequence.
+	// Arm starts the Running actor's serving loop. The public Session calls
+	// it AFTER emitting HandshakeCompleted/ConfigAssigned/Started, so
+	// Running terminal events can never reorder before the success
+	// sequence.
 	Arm func()
 	// Terminated receives the Running actor's exit value exactly once:
 	// nil = peer-initiated IKE delete (clean shutdown), ctx.Err() =

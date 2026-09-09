@@ -1,20 +1,3 @@
-// Package events is the single event hub of a session.
-//
-// Semantics:
-//
-//   - Control-plane transitions only; there are no per-packet events.
-//   - Success ordering is deterministic on every subscription:
-//     Starting -> HandshakeStarted -> [stage/EAP/algorithm events ...] ->
-//     HandshakeCompleted -> ConfigAssigned -> Started.
-//   - Emitters never block: hub overflow degrades to dropping the event for
-//     subscribers whose mailbox is full (the hub itself always accepts).
-//   - New subscribers receive a replay of the last N retained events first,
-//     so a late listener can still observe HandshakeCompleted/Started.
-//   - Slow or disconnected subscribers cannot stall emitters, the hub or
-//     the protocol workers.
-//
-// One hub goroutine serializes all delivery; Emit/Subscribe only enqueue
-// mailbox messages.
 package events
 
 import "sync"
