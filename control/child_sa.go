@@ -55,10 +55,12 @@ func (h *Handshake) buildFinalAuthRequest(msgID uint32) ([]*transport.Frame, err
 }
 
 // processFinalAuth absorbs the final response and produces the active
-// ChildSA plus AssignedConfig (stored on state).
-func (h *Handshake) processFinalAuth(m *wire.Message) (*ChildSA, error) {
+// ChildSA plus AssignedConfig (stored on state). The bool result reports
+// that the CP payload was CFG_SET rather than CFG_REPLY, so the caller can
+// answer CFG_ACK in the same IKE_AUTH exchange.
+func (h *Handshake) processFinalAuth(m *wire.Message) (*ChildSA, bool, error) {
 	if h.state.NegotiatingChild == nil {
-		return nil, fmt.Errorf("control: missing negotiating CHILD_SA state")
+		return nil, false, fmt.Errorf("control: missing negotiating CHILD_SA state")
 	}
 
 	var auth *payload.Auth
@@ -78,7 +80,7 @@ func (h *Handshake) processFinalAuth(m *wire.Message) (*ChildSA, error) {
 		case wire.PayloadTypeAuth:
 			a, err := payload.ParseAuth(p.Body)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			auth = &a
 		case wire.PayloadTypeIDr:
@@ -88,16 +90,16 @@ func (h *Handshake) processFinalAuth(m *wire.Message) (*ChildSA, error) {
 		case wire.PayloadTypeCert:
 			cert, err := payload.ParseCert(p.Body)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if cert.Encoding != wire.CertEncodingX509Signature {
-				return nil, fmt.Errorf("control: unsupported CERT encoding %d", cert.Encoding)
+				return nil, false, fmt.Errorf("control: unsupported CERT encoding %d", cert.Encoding)
 			}
 			certs = append(certs, append([]byte(nil), cert.DER...))
 		case wire.PayloadTypeSA:
 			sa, err := payload.ParseSA(p.Body)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			childSA = &sa
 		case wire.PayloadTypeTSi:
@@ -109,15 +111,15 @@ func (h *Handshake) processFinalAuth(m *wire.Message) (*ChildSA, error) {
 		case wire.PayloadTypeNotify:
 			n, err := payload.ParseNotify(p.Body)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			notifies = append(notifies, n)
 			if len(n.SPI) > 0 {
 				if len(n.SPI) != 4 {
-					return nil, fmt.Errorf("control: unexpected SPI size in final IKE_AUTH notify")
+					return nil, false, fmt.Errorf("control: unexpected SPI size in final IKE_AUTH notify")
 				}
 				if !isChildFailureNotify(n.Type) {
-					return nil, fmt.Errorf("control: unexpected SPI-scoped notify %d in final IKE_AUTH", uint16(n.Type))
+					return nil, false, fmt.Errorf("control: unexpected SPI-scoped notify %d in final IKE_AUTH", uint16(n.Type))
 				}
 				spiNotifies = append(spiNotifies, cesSpiNotify{
 					typ:      n.Type,
@@ -132,72 +134,79 @@ func (h *Handshake) processFinalAuth(m *wire.Message) (*ChildSA, error) {
 	}
 
 	if len(eapBody) != 0 {
-		return nil, fmt.Errorf("control: final IKE_AUTH response must not include EAP payload")
+		return nil, false, fmt.Errorf("control: final IKE_AUTH response must not include EAP payload")
 	}
 	if err := h.validateAuthNotifies(notifies); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if auth == nil {
-		return nil, fmt.Errorf("control: final IKE_AUTH response missing AUTH payload")
+		return nil, false, fmt.Errorf("control: final IKE_AUTH response missing AUTH payload")
 	}
 	peerIDr := idr
 	if len(peerIDr) == 0 {
 		peerIDr = append([]byte(nil), h.state.Auth.PeerIDr...)
 	}
 	if len(peerIDr) < 4 {
-		return nil, fmt.Errorf("control: final IKE_AUTH response missing IDr payload")
+		return nil, false, fmt.Errorf("control: final IKE_AUTH response missing IDr payload")
 	}
 	if err := h.recordPeerIdentity(peerIDr); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(certs) > 0 {
 		h.state.Auth.PeerCerts = certs
 	}
 	if err := h.verifyPeerAuth(peerIDr, *auth); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	if childSA == nil {
 		if reason := cesChildFailureReason(notifies); reason != "" {
-			return nil, fmt.Errorf("control: CHILD_SA negotiation failed: %s", reason)
+			return nil, false, fmt.Errorf("control: CHILD_SA negotiation failed: %s", reason)
 		}
-		return nil, fmt.Errorf("control: final IKE_AUTH response missing CHILD_SA proposal")
+		return nil, false, fmt.Errorf("control: final IKE_AUTH response missing CHILD_SA proposal")
 	}
 
 	peerSPI, selection, err := h.decodeChildSelection(*childSA)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	localInbound := h.state.NegotiatingChild.InboundSPI
 	if err := cesValidateSpiNotifies(spiNotifies, peerSPI, localInbound); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	h.state.SelectedESP = selection
 
 	if len(cpBody) == 0 {
-		return nil, fmt.Errorf("control: final IKE_AUTH response missing CP payload")
+		return nil, false, fmt.Errorf("control: final IKE_AUTH response missing CP payload")
 	}
-	assigned, err := cesDecodeAssigned(cpBody)
+	cp, err := payload.ParseConfigPayload(cpBody)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if cp.Kind != wire.ConfigTypeReply && cp.Kind != wire.ConfigTypeSet {
+		return nil, false, fmt.Errorf("control: final IKE_AUTH CP payload has unexpected kind %d", uint8(cp.Kind))
+	}
+	assigned, _, err := cesDecodeAssignedCP(cp)
+	if err != nil {
+		return nil, false, err
 	}
 	if assigned.InternalIPv4 == nil && assigned.InternalIPv6 == nil {
-		return nil, fmt.Errorf("control: final IKE_AUTH CP reply missing INTERNAL_IP4/6_ADDRESS")
+		return nil, false, fmt.Errorf("control: final IKE_AUTH CP reply missing INTERNAL_IP4/6_ADDRESS")
 	}
 
 	if len(tsiBody) == 0 || len(tsrBody) == 0 {
-		return nil, fmt.Errorf("control: final IKE_AUTH response missing TSi/TSr payload")
+		return nil, false, fmt.Errorf("control: final IKE_AUTH response missing TSi/TSr payload")
 	}
 	tsi, err := payload.ParseTS(tsiBody)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	tsr, err := payload.ParseTS(tsrBody)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := h.validateTrafficSelectors(tsi, tsr, assigned); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	h.state.Assigned = assigned
@@ -210,7 +219,7 @@ func (h *Handshake) processFinalAuth(m *wire.Message) (*ChildSA, error) {
 	}
 	h.state.NegotiatingChild = nil
 	h.state.ActiveChild = child
-	return child, nil
+	return child, cp.Kind == wire.ConfigTypeSet, nil
 }
 
 // decodeChildSelection maps the responder's chosen ESP proposal number and
@@ -602,16 +611,36 @@ func cesChildFailureReason(notifies []payload.Notify) string {
 	return ""
 }
 
-// cesDecodeAssigned parses a CFG_REPLY body into AssignedConfig.
+// cesAssignedMask marks which categories a parsed CFG body carries. CFG_SET
+// merge semantics use it so a partial push does not clear categories the
+// server left unspecified.
+type cesAssignedMask struct {
+	v4Addr bool
+	v4DNS  bool
+	v6Addr bool
+	v6DNS  bool
+	expiry bool
+}
+
+// cesDecodeAssigned parses a CFG_REPLY or CFG_SET body into AssignedConfig.
 func cesDecodeAssigned(b []byte) (*AssignedConfig, error) {
 	cp, err := payload.ParseConfigPayload(b)
 	if err != nil {
 		return nil, err
 	}
-	if !cp.IsReply {
-		return nil, fmt.Errorf("control: expected CFG_REPLY in final IKE_AUTH")
+	if cp.Kind != wire.ConfigTypeReply && cp.Kind != wire.ConfigTypeSet {
+		return nil, fmt.Errorf("control: expected CFG_REPLY or CFG_SET")
 	}
+	assigned, _, err := cesDecodeAssignedCP(cp)
+	return assigned, err
+}
+
+// cesDecodeAssignedCP converts a parsed CFG_REPLY/CFG_SET payload into an
+// AssignedConfig plus the present-category mask, enforcing the
+// attribute-length rules. The caller owns the kind check.
+func cesDecodeAssignedCP(cp payload.ConfigPayload) (*AssignedConfig, cesAssignedMask, error) {
 	out := &AssignedConfig{}
+	var mask cesAssignedMask
 	for i := range cp.Attributes {
 		attr := &cp.Attributes[i]
 		switch attr.Type {
@@ -620,38 +649,43 @@ func cesDecodeAssigned(b []byte) (*AssignedConfig, error) {
 				continue
 			}
 			if len(attr.Value) != 4 {
-				return nil, fmt.Errorf("control: invalid INTERNAL_IP4_ADDRESS length %d", len(attr.Value))
+				return nil, mask, fmt.Errorf("control: invalid INTERNAL_IP4_ADDRESS length %d", len(attr.Value))
 			}
 			out.InternalIPv4 = net.IPv4(attr.Value[0], attr.Value[1], attr.Value[2], attr.Value[3])
+			mask.v4Addr = true
 		case wire.ConfigAttrInternalIPv4DNS:
 			if len(attr.Value) != 4 {
-				return nil, fmt.Errorf("control: invalid INTERNAL_IP4_DNS length %d", len(attr.Value))
+				return nil, mask, fmt.Errorf("control: invalid INTERNAL_IP4_DNS length %d", len(attr.Value))
 			}
 			out.DNS4 = append(out.DNS4, net.IPv4(attr.Value[0], attr.Value[1], attr.Value[2], attr.Value[3]))
+			mask.v4DNS = true
 		case wire.ConfigAttrInternalIPv6Address:
 			if len(attr.Value) == 0 {
 				continue
 			}
 			if len(attr.Value) != 17 {
-				return nil, fmt.Errorf("control: invalid INTERNAL_IP6_ADDRESS length %d", len(attr.Value))
+				return nil, mask, fmt.Errorf("control: invalid INTERNAL_IP6_ADDRESS length %d", len(attr.Value))
 			}
 			if attr.Value[16] > 128 {
-				return nil, fmt.Errorf("control: invalid INTERNAL_IP6_ADDRESS prefix length %d", attr.Value[16])
+				return nil, mask, fmt.Errorf("control: invalid INTERNAL_IP6_ADDRESS prefix length %d", attr.Value[16])
 			}
 			out.InternalIPv6 = append(net.IP(nil), attr.Value[:16]...)
 			out.InternalIPv6Prefix = attr.Value[16]
+			mask.v6Addr = true
 		case wire.ConfigAttrInternalIPv6DNS:
 			if len(attr.Value) != 16 {
-				return nil, fmt.Errorf("control: invalid INTERNAL_IP6_DNS length %d", len(attr.Value))
+				return nil, mask, fmt.Errorf("control: invalid INTERNAL_IP6_DNS length %d", len(attr.Value))
 			}
 			out.DNS6 = append(out.DNS6, append(net.IP(nil), attr.Value...))
+			mask.v6DNS = true
 		case wire.ConfigAttrInternalAddressExpiry:
 			if len(attr.Value) == 4 {
 				out.AddressExpirySeconds = uint32(attr.Value[0])<<24 | uint32(attr.Value[1])<<16 | uint32(attr.Value[2])<<8 | uint32(attr.Value[3])
+				mask.expiry = true
 			}
 		}
 	}
-	return out, nil
+	return out, mask, nil
 }
 
 // cesCheckSelector enforces the shared MVP selector rules: protocol 0 and

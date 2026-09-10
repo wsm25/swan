@@ -18,9 +18,9 @@ import (
 //
 // The bootstrap request carries IDi, INITIAL_CONTACT, (IDr when rightid is
 // set), CP request, the child SA proposals (with SPI), TSi (0.0.0.0-...),
-// TSr (strongswan default 2000::/3-shaped), MOBIKE_SUPPORTED,
-// NO_ADDITIONAL_ADDRESSES, MULTIPLE_AUTH_SUPPORTED, EAP_ONLY_AUTHENTICATION
-// and IKEV2_MESSAGE_ID_SYNC_SUPPORTED — the exact MVP shape of swan2.
+// TSr (strongswan default 2000::/3-shaped), NO_ADDITIONAL_ADDRESSES,
+// MULTIPLE_AUTH_SUPPORTED and EAP_ONLY_AUTHENTICATION. MOBIKE is not
+// implemented, so the request no longer advertises MOBIKE_SUPPORTED.
 
 // buildBootstrapAuthRequest renders the first IKE_AUTH request for a fresh
 // child-SA negotiation and records the negotiating state.
@@ -53,7 +53,6 @@ func (h *Handshake) buildBootstrapAuthRequest(msgID uint32) ([]*transport.Frame,
 		cesPayloadPart{typ: wire.PayloadTypeTSr, body: payload.AppendTS(nil, tsrStrongswanDefault())},
 	)
 	for _, t := range []wire.NotifyType{
-		wire.NotifyMobikeSupported,
 		wire.NotifyNoAdditionalAddresses,
 		wire.NotifyMultipleAuthSupported,
 		wire.NotifyEapOnlyAuthentication,

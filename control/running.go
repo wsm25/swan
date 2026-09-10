@@ -528,13 +528,19 @@ func (r *Running) processResponse(ctx context.Context, tx chan<- *transport.Fram
 
 // processInformational applies the swan2
 // process_informational_request_payloads rules to an already-decrypted
-// payload list and sends the (empty or DELETE) answer.
+// payload list and sends the (empty, CFG_ACK or DELETE) answer.
 func (r *Running) processInformational(ctx context.Context, tx chan<- *transport.Frame, msg *wire.Message, inner []wire.Payload) (bool, error) {
-	shutdown, err := r.handleInformationalForPayloads(inner)
+	shutdown, cfgAck, err := r.handleInformationalForPayloads(inner)
 	if err != nil {
 		return false, err
 	}
-	frames, err := buildProtectedStateAs(nil, r.state, wire.ExchangeInformational, msg.Header.MessageID, wire.PayloadTypeNone, nil, responseFlags(stateIKEEnvelope(r.state)))
+	next := wire.PayloadTypeNone
+	var responseBody []byte
+	if cfgAck {
+		next = wire.PayloadTypeCP
+		responseBody = cepSinglePayload(payload.AppendConfigPayload(nil, payload.ConfigPayload{Kind: wire.ConfigTypeAck}))
+	}
+	frames, err := buildProtectedStateAs(nil, r.state, wire.ExchangeInformational, msg.Header.MessageID, next, responseBody, responseFlags(stateIKEEnvelope(r.state)))
 	if err != nil {
 		return false, err
 	}
@@ -557,39 +563,56 @@ func (r *Running) processInformational(ctx context.Context, tx chan<- *transport
 // handleInformationalForPayloads applies the swan2
 // process_informational_request_payloads rules to an already-decrypted
 // payload list. DELETE is accepted for the active child, a retained old
-// child, or the active IKE SA; unknown child SPIs are dropped.
-func (r *Running) handleInformationalForPayloads(plds []wire.Payload) (peerShutdown bool, err error) {
+// child, or the active IKE SA; unknown child SPIs are dropped. A running
+// request carrying exactly one CFG_SET is applied and the bool result asks
+// processInformational to answer CFG_ACK.
+func (r *Running) handleInformationalForPayloads(plds []wire.Payload) (peerShutdown bool, cfgAck bool, err error) {
 	if len(plds) == 0 {
-		return false, nil
+		return false, false, nil
+	}
+	if len(plds) == 1 && plds[0].Type == wire.PayloadTypeCP {
+		cp, perr := payload.ParseConfigPayload(plds[0].Body)
+		if perr != nil {
+			return false, false, perr
+		}
+		if cp.Kind != wire.ConfigTypeSet {
+			return false, false, errors.New("control: unexpected non-delete payload in running request")
+		}
+		assigned, present, aerr := cesDecodeAssignedCP(cp)
+		if aerr != nil {
+			return false, false, aerr
+		}
+		r.applyConfigUpdate(assigned, present, configApplyMerge)
+		return false, true, nil
 	}
 	var deletePayload *payload.Delete
 	for i := range plds {
 		p := &plds[i]
 		if p.Type != wire.PayloadTypeDelete {
-			return false, errors.New("control: unexpected non-delete payload in running request")
+			return false, false, errors.New("control: unexpected non-delete payload in running request")
 		}
 		d, derr := payload.ParseDelete(p.Body)
 		if derr != nil {
-			return false, derr
+			return false, false, derr
 		}
 		if deletePayload != nil {
-			return false, errors.New("control: multiple delete payloads in one running request")
+			return false, false, errors.New("control: multiple delete payloads in one running request")
 		}
 		deletePayload = &d
 	}
 	if deletePayload == nil {
-		return false, errors.New("control: running request carries no delete payload")
+		return false, false, errors.New("control: running request carries no delete payload")
 	}
 
 	switch deletePayload.ProtocolID {
 	case wire.DeleteProtocolIKE:
 		if len(deletePayload.SPIs) != 0 {
-			return false, errors.New("control: ike delete must not carry spis")
+			return false, false, errors.New("control: ike delete must not carry spis")
 		}
-		return true, nil
+		return true, false, nil
 	case wire.DeleteProtocolESP:
 		if len(deletePayload.SPIs) != 1 {
-			return false, errors.New("control: esp delete must carry exactly one spi")
+			return false, false, errors.New("control: esp delete must carry exactly one spi")
 		}
 		spi := deletePayload.SPIs[0]
 		// A DELETE for a replaced child only cleans up the retained inbound
@@ -600,19 +623,19 @@ func (r *Running) handleInformationalForPayloads(plds []wire.Payload) (peerShutd
 			if r.state.Phase == PhaseRekeyChildDeletingOld {
 				r.state.Phase = PhaseRunning
 			}
-			return false, nil
+			return false, false, nil
 		}
 		if r.state.ActiveChild == nil {
-			return false, nil
+			return false, false, nil
 		}
 		if spi != r.state.ActiveChild.OutboundSPI {
-			return false, nil
+			return false, false, nil
 		}
 		r.dataplaneChildDeleted(*r.state.ActiveChild)
 		r.state.ActiveChild = nil
-		return false, nil
+		return false, false, nil
 	default:
-		return false, fmt.Errorf("control: unsupported delete protocol %d", deletePayload.ProtocolID)
+		return false, false, fmt.Errorf("control: unsupported delete protocol %d", deletePayload.ProtocolID)
 	}
 }
 
@@ -742,20 +765,7 @@ func (r *Running) finishLeaseResponse(inner []wire.Payload) error {
 		r.leaseRetryOrExpire(context.Background())
 		return err
 	}
-	old := r.state.Assigned
-	if old != nil {
-		if !assigned.InternalIPv4.Equal(old.InternalIPv4) || !assigned.InternalIPv6.Equal(old.InternalIPv6) {
-			return errors.New("control: CFG_REPLY changed the assigned address during renewal")
-		}
-	}
-	r.state.Assigned = assigned
-	r.armLeaseTimer()
-	if r.cfg.DataUpdates != nil {
-		select {
-		case r.cfg.DataUpdates <- DataplaneUpdate{Kind: UpdateAssigned, Assigned: *assigned}:
-		default:
-		}
-	}
+	r.applyConfigUpdate(assigned, cesAssignedMask{}, configApplyReplace)
 	return nil
 }
 

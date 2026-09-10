@@ -282,7 +282,8 @@ func (c *Control) runHandshake(ctx context.Context, in <-chan *transport.Packet,
 	if err != nil {
 		return nil, h.fail(tx, err)
 	}
-	if _, err := h.processFinalAuth(finalMsg); err != nil {
+	_, cfgSet, err := h.processFinalAuth(finalMsg)
+	if err != nil {
 		// swan2 emits the negotiated ESP algorithm event as soon as the
 		// CHILD_SA proposal has been decoded, before CP/TS validation. If
 		// processFinalAuth got that far and then failed on CP/traffic
@@ -292,6 +293,27 @@ func (c *Control) runHandshake(ctx context.Context, in <-chan *transport.Packet,
 			h.emitNegotiatedESP()
 		}
 		return nil, h.fail(tx, err)
+	}
+	if cfgSet {
+		// A CFG_SET normally rides an INFORMATIONAL exchange. This is a
+		// generic compatibility branch for a responder that configures us
+		// with CFG_SET in the final IKE_AUTH response instead of
+		// CFG_REPLY: answer CFG_ACK on the same exchange/message-id with
+		// the response flags for our original-initiator role. The local
+		// and real strongSwan responders use CFG_REPLY here, so this
+		// branch is best-effort and mostly untested on the wire.
+		ackBody := payload.AppendConfigPayload(nil, payload.ConfigPayload{Kind: wire.ConfigTypeAck})
+		ackFrames, err := buildProtectedStateAs(h.cfg, h.state, wire.ExchangeIkeAuth, finalID, wire.PayloadTypeCP, cepSinglePayload(ackBody), responseFlags(stateIKEEnvelope(h.state)))
+		if err != nil {
+			return nil, h.fail(tx, err)
+		}
+		for _, frame := range ackFrames {
+			select {
+			case tx <- frame:
+			case <-demuxCtx.Done():
+				return nil, h.fail(tx, demuxCtx.Err())
+			}
+		}
 	}
 	h.emitNegotiatedESP()
 	childKeys, err := h.deriveChildKeys()

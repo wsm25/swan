@@ -15,18 +15,20 @@ type ConfigAttribute struct {
 	Value []byte
 }
 
-// ConfigPayload is the body of a CP payload: type (request/reply) plus
-// attributes.
+// ConfigPayload is the body of a CP payload: kind (RFC 7296 2.19
+// CFG_REQUEST/CFG_REPLY/CFG_SET/CFG_ACK) plus attributes. CFG_ACK carries no
+// attributes; the other kinds carry zero or more ConfigAttribute entries.
 type ConfigPayload struct {
-	IsReply    bool
+	Kind       wire.ConfigType
 	Attributes []ConfigAttribute
 }
 
-// AppendConfigPayload serializes the CP payload body.
+// AppendConfigPayload serializes the CP payload body. A zero ConfigPayload
+// is serialized as CFG_REQUEST to preserve the pre-Kind field behavior.
 func AppendConfigPayload(dst []byte, cp ConfigPayload) []byte {
-	cfgType := byte(wire.ConfigTypeRequest)
-	if cp.IsReply {
-		cfgType = wire.ConfigTypeReply
+	cfgType := byte(cp.Kind)
+	if cfgType == 0 {
+		cfgType = byte(wire.ConfigTypeRequest)
 	}
 	start := len(dst)
 	dst = append(dst, cfgType, 0, 0, 0)
@@ -37,13 +39,15 @@ func AppendConfigPayload(dst []byte, cp ConfigPayload) []byte {
 	return dst
 }
 
-// ParseConfigPayload decodes the CP payload body with bounds checks.
+// ParseConfigPayload decodes the CP payload body with bounds checks. All four
+// RFC 7296 2.19 kinds are accepted; callers apply the exchange-specific
+// kind rules.
 func ParseConfigPayload(b []byte) (ConfigPayload, error) {
 	if len(b) < ConfigFixedLen {
 		return ConfigPayload{}, fmt.Errorf("configuration payload too short: %d bytes", len(b))
 	}
-	switch b[0] {
-	case wire.ConfigTypeRequest, wire.ConfigTypeReply:
+	switch wire.ConfigType(b[0]) {
+	case wire.ConfigTypeRequest, wire.ConfigTypeReply, wire.ConfigTypeSet, wire.ConfigTypeAck:
 	default:
 		return ConfigPayload{}, fmt.Errorf("unsupported configuration payload type %d", b[0])
 	}
@@ -51,7 +55,7 @@ func ParseConfigPayload(b []byte) (ConfigPayload, error) {
 		return ConfigPayload{}, fmt.Errorf("configuration payload has non-zero reserved bytes")
 	}
 
-	cp := ConfigPayload{IsReply: b[0] == wire.ConfigTypeReply}
+	cp := ConfigPayload{Kind: wire.ConfigType(b[0])}
 	rest := b[ConfigFixedLen:]
 	for len(rest) > 0 {
 		attr, tail, err := parseConfigAttribute(rest)
@@ -68,7 +72,7 @@ func ParseConfigPayload(b []byte) (ConfigPayload, error) {
 // INTERNAL_IP4_DNS, INTERNAL_IP6_ADDRESS, INTERNAL_IP6_DNS — the exact
 // request set swan2 sends in bootstrap IKE_AUTH.
 func AppendConfigRequest(dst []byte) []byte {
-	cp := ConfigPayload{}
+	cp := ConfigPayload{Kind: wire.ConfigTypeRequest}
 	for _, typ := range []uint16{
 		wire.ConfigAttrInternalIPv4Address,
 		wire.ConfigAttrInternalIPv4DNS,
@@ -92,7 +96,7 @@ type ConfigRenewRequest struct {
 // it carries the current assigned addresses as non-empty RFC 7296 3.15
 // suggestions and re-requests DNS attributes.
 func AppendConfigRenewRequest(dst []byte, req ConfigRenewRequest) []byte {
-	cp := ConfigPayload{}
+	cp := ConfigPayload{Kind: wire.ConfigTypeRequest}
 	attrs := make([]ConfigAttribute, 0, 4)
 	if v4 := req.InternalIPv4.To4(); v4 != nil {
 		attrs = append(attrs, ConfigAttribute{Type: wire.ConfigAttrInternalIPv4Address, Value: append([]byte(nil), v4...)})

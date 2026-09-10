@@ -184,9 +184,10 @@ Current behavior:
 
 3.1 bootstrap inner chain: IDi | INITIAL_CONTACT | IDr-request (only when
   rightid is set) | CP-request | child-SA (fresh SPI) | TSi dual-stack any |
-  TSr strongswan-default (v4 full, v6 2000::/3) | MOBIKE_SUPPORTED |
+  TSr strongswan-default (v4 full, v6 2000::/3) |
   NO_ADDITIONAL_ADDRESSES | MULTIPLE_AUTH_SUPPORTED |
-  EAP_ONLY_AUTHENTICATION. **The request does NOT advertise
+  EAP_ONLY_AUTHENTICATION. MOBIKE is not implemented and the request no
+  longer advertises MOBIKE_SUPPORTED. **The request does NOT advertise
   IKEV2_MESSAGE_ID_SYNC_SUPPORTED.**
 
 3.2 response handling: EAP/AUTH/IDr/CERT/notify collection; NOTIFY with
@@ -414,7 +415,9 @@ Current behavior:
   assigned config, child state, and EAP MSK on both failure and close.
 - `AddressExpirySeconds` is parsed from CP attribute 5; at 80% of the lease
   the running actor renews via INFORMATIONAL + CFG_REQUEST, retries on
-  failure, and treats hard expiry as a session failure.
+  failure, and treats hard expiry as a session failure. Renewal replies may
+  change the address and/or DNS; a CFG_SET push is applied and answered
+  with CFG_ACK.
 - The running actor rejects cleartext INFORMATIONALs and enforces request
   message-id ordering with the 4-entry response replay cache.
 

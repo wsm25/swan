@@ -161,10 +161,17 @@ const (
 	ESNNoExtendedSequenceNumbers = 0
 )
 
+// ConfigType names the CP payload kind (RFC 7296 2.19). CFG_SET is sent by
+// the address owner and CFG_ACK confirms it; CFG_REQUEST/CFG_REPLY are the
+// request/response pair used by the initiator.
+type ConfigType uint8
+
 // Configuration payload types and attribute numbers (RFC 7296 2.19/3.15).
 const (
-	ConfigTypeRequest = 1
-	ConfigTypeReply   = 2
+	ConfigTypeRequest ConfigType = 1
+	ConfigTypeReply   ConfigType = 2
+	ConfigTypeSet     ConfigType = 3
+	ConfigTypeAck     ConfigType = 4
 
 	ConfigAttrInternalIPv4Address   = 1
 	ConfigAttrInternalIPv4DNS       = 3

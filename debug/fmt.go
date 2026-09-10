@@ -198,7 +198,7 @@ func renderPayload(log *slog.Logger, dir string, p *wire.Payload) {
 		}
 	case wire.PayloadTypeCP:
 		if cp, err := payload.ParseConfigPayload(p.Body); err == nil {
-			attrs = append(attrs, "reply", cp.IsReply, "attributes", cpSummary(cp))
+			attrs = append(attrs, "kind", ConfigTypeName(cp.Kind), "attributes", cpSummary(cp))
 		}
 	case wire.PayloadTypeEAP:
 		EAP(log, dir, p.Body)

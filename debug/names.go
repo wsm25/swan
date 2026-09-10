@@ -197,6 +197,22 @@ func TransformTypeName(t wire.TransformType) string {
 	}
 }
 
+// ConfigTypeName maps a CP payload kind ("CFG_REQUEST"...).
+func ConfigTypeName(t wire.ConfigType) string {
+	switch t {
+	case wire.ConfigTypeRequest:
+		return "CFG_REQUEST"
+	case wire.ConfigTypeReply:
+		return "CFG_REPLY"
+	case wire.ConfigTypeSet:
+		return "CFG_SET"
+	case wire.ConfigTypeAck:
+		return "CFG_ACK"
+	default:
+		return fmt.Sprintf("#%d", uint8(t))
+	}
+}
+
 // ConfigAttributeName maps a CP attribute ("INTERNAL_IP4_ADDRESS"...).
 func ConfigAttributeName(t uint16) string {
 	switch t {
