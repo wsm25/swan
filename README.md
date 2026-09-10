@@ -185,6 +185,14 @@ func main() {
   near-wraparound emergency rekey this should be unreachable in practice.
   Reaching it reports `swan/esp: ESP sequence number wrapped after 2^32-1
   packets` and the session converts it into `Broken` and shutdown.
+- MOBIKE is not implemented: the IKE_AUTH request advertises
+  `MOBIKE_SUPPORTED` (the MVP wire shape) but address-change handling
+  does not exist. Changing networks drains the keepalive ladder and ends
+  the session as `Broken`.
+- Dynamic configuration from the peer is limited to the lease renewal
+  round: the refreshed CFG_REPLY may update DNS and the expiry, but a
+  changed internal address is rejected and unsolicited CFG_SET pushes
+  from the peer are ignored.
 - Local pubkey AUTH is not exercised; local auth is EAP-PEAP only.
 - The test path is the containerized strongSwan/FreeRADIUS setup in
   `tests/README.md`. The handshake and ping flow work against that
