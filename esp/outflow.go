@@ -163,8 +163,8 @@ func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
 		trailerICV = enc.ICVLen
 	}
 	wireLen := espHeaderLen + enc.IVLen + len(plain) + trailerICV
-	if wireLen > transport.MaxFramePayload {
-		return nil, nil, fmt.Errorf("github.com/wsm25/swan/esp: encapsulated packet %d bytes exceeds transport limit %d", wireLen, transport.MaxFramePayload)
+	if wireLen > transport.MaxWireDatagram {
+		return nil, nil, fmt.Errorf("github.com/wsm25/swan/esp: encapsulated packet %d bytes exceeds transport limit %d", wireLen, transport.MaxWireDatagram)
 	}
 
 	var (

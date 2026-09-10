@@ -1,10 +1,10 @@
 // Package swan is the public API of a userspace, initiator-only IKEv2
 // (NAT-T) library.
 //
-// The caller injects an io.ReadWriteCloser that carries length-prefixed
-// NAT-T datagrams and receives a Tunnel whose Read and Write carry one raw
-// IP packet per call. The library never opens sockets and never owns a TUN
-// device.
+// The caller injects an io.ReadWriteCloser with datagram semantics (one
+// complete NAT-T datagram per Read/Write, same as *net.UDPConn) and
+// receives a Tunnel whose Read and Write carry one raw IP packet per call.
+// The library never opens sockets and never owns a TUN device.
 //
 // # Layers
 //
@@ -21,7 +21,7 @@
 //
 // # Worker topology (per session)
 //
-//	wire (io.ReadWriteCloser in)
+//	wire (datagram io.ReadWriteCloser in)
 //	  └─ transport.RxWorker ──ESP──► esp InboundWorker ──► Tunnel
 //	                  └───────IKE──► control demux ─► handshake → running
 //	handshake/running/esp OutboundWorker ─► transport.TxWorker ─► wire

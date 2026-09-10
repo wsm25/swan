@@ -1,29 +1,42 @@
 package transport
 
 import (
-	"encoding/binary"
-	"fmt"
-	"io"
 	"net"
 )
 
-// Frame constants for the stream framing described in the package doc.
+// Wire constants.
 const (
-	// FrameHeaderSize is the uint16 big-endian length prefix.
-	FrameHeaderSize = 2
-	// MaxFramePayload is the largest supported frame payload; any larger
-	// declared length is rejected as a decode error.
-	MaxFramePayload = 65535
+	// MaxWireDatagram is the largest legal NAT-T datagram payload. The
+	// transport reads into buffers of at least this size; a peer that sends
+	// more is outside the protocol and its packet is rejected later by the
+	// IKE/ESP layers' own length checks.
+	MaxWireDatagram = 65535
 	// LogicalNatTPort is the logical NAT-T/IKE port used inside the
 	// protocol. NAT-D hashing, keepalives and classification always use
 	// this value, never a backend-specific local port.
 	LogicalNatTPort = 4500
 	// NonESPMarkerLen is the size of the all-zero non-ESP marker that
-	// prefixes IKE payloads in NAT-T frames.
+	// prefixes IKE payloads in NAT-T datagrams.
 	NonESPMarkerLen = 4
 )
 
-// Kind is the classification result / frame type of a NAT-T payload.
+// batchReader / batchWriter are optional wire capabilities discovered by
+// type assertion. A wire that implements them gets the batched fast path;
+// everything else degrades to one-datagram-per-call loops.
+//
+// ReadBatch must block until at least one datagram or an error. It may
+// return n > 0 together with err (recvmmsg-style): datagrams [0,n) are
+// valid, the error aborts the batch afterwards. WriteBatch may write a
+// legal prefix of the list; the caller retries the remainder.
+type batchReader interface {
+	ReadBatch(bufs [][]byte, sizes []int) (int, error)
+}
+
+type batchWriter interface {
+	WriteBatch(bufs [][]byte) (int, error)
+}
+
+// Kind is the classification result / datagram type of a NAT-T payload.
 type Kind uint8
 
 const (
@@ -113,76 +126,6 @@ func zeros(b []byte) bool {
 		}
 	}
 	return true
-}
-
-// ReadFrame reads exactly one frame from the stream, including the length
-// prefix. Callers may pass a scratch buffer to reuse; nil allocates. The
-// returned Frame.Payload may alias scratch: the caller owns it and must not
-// keep using scratch until the payload is done.
-//
-// io.EOF is returned only at a clean frame boundary (zero bytes read). A
-// truncated frame is reported as io.ErrUnexpectedEOF.
-func ReadFrame(r io.Reader, scratch []byte) (Frame, error) {
-	var hdr [FrameHeaderSize]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		if err == io.EOF {
-			return Frame{}, io.EOF
-		}
-		return Frame{}, fmt.Errorf("github.com/wsm25/swan/transport: read frame header: %w", err)
-	}
-
-	n := int(binary.BigEndian.Uint16(hdr[:]))
-	if n > MaxFramePayload {
-		return Frame{}, fmt.Errorf("github.com/wsm25/swan/transport: frame payload %d exceeds limit %d", n, MaxFramePayload)
-	}
-
-	payload := grow(scratch, n)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		if err == io.EOF {
-			err = io.ErrUnexpectedEOF
-		}
-		return Frame{}, fmt.Errorf("github.com/wsm25/swan/transport: read frame payload: %w", err)
-	}
-
-	return Frame{Kind: Classify(payload), Payload: payload}, nil
-}
-
-func grow(scratch []byte, n int) []byte {
-	if cap(scratch) >= n {
-		return scratch[:n]
-	}
-	return make([]byte, n)
-}
-
-// WriteFrame writes one frame (length prefix plus payload) in a single
-// Write call, iterating until every byte is written. The payload is written
-// verbatim: NAT-T marker/keepalive shaping is the caller's (or TxWorker's)
-// job.
-func WriteFrame(w io.Writer, f Frame) error {
-	if len(f.Payload) > MaxFramePayload {
-		return fmt.Errorf("github.com/wsm25/swan/transport: frame payload %d exceeds limit %d", len(f.Payload), MaxFramePayload)
-	}
-	buf := make([]byte, FrameHeaderSize+len(f.Payload))
-	binary.BigEndian.PutUint16(buf[:FrameHeaderSize], uint16(len(f.Payload)))
-	copy(buf[FrameHeaderSize:], f.Payload)
-	return writeAll(w, buf)
-}
-
-func writeAll(w io.Writer, b []byte) error {
-	for len(b) > 0 {
-		n, err := w.Write(b)
-		if n < 0 || n > len(b) {
-			return fmt.Errorf("github.com/wsm25/swan/transport: invalid write count %d", n)
-		}
-		b = b[n:]
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-	}
-	return nil
 }
 
 // LogicalAddr returns the address with its port replaced by the logical

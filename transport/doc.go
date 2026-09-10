@@ -1,21 +1,23 @@
-// Package transport adapts the injected stream wire into framed, classified
-// NAT-T datagrams and hands them to the control and ESP layers.
+// Package transport consumes the injected datagram wire (one NAT-T
+// datagram per Read/Write), classifies payloads, and hands them to the
+// control and ESP layers.
 //
-// # Stream framing
+// # Wire contract
 //
-// The wire is an io.ReadWriteCloser, a byte stream without datagram
-// boundaries. The library defines this frame format:
+// The wire is an io.ReadWriteCloser with datagram semantics, exactly like a
+// connected *net.UDPConn: one Read returns one complete datagram, one Write
+// sends one complete datagram. The payload of a datagram is the exact bytes
+// that would appear on a UDP socket:
 //
-//	frame   := <length: uint16 big-endian> <payload: length bytes>
-//	payload := the exact bytes that would appear on a UDP socket:
-//	           - NAT-T keepalive: 0xff
-//	           - IKE:  4-byte non-ESP marker (all zero) followed by the IKE
-//	                   message
-//	           - ESP:  the raw ESP datagram (UDP-encapsulated, no marker)
+//   - NAT-T keepalive: 0xff
+//   - IKE:  4-byte non-ESP marker (all zero) followed by the IKE message
+//   - ESP:  the raw ESP datagram (UDP-encapsulated, no marker)
 //
-// MaxFramePayload bounds a frame payload. The reader accumulates a stream
-// until the declared length arrives; a truncated frame is
-// io.ErrUnexpectedEOF and an oversized declared length is a decode error.
+// MaxWireDatagram bounds a legal payload. Stream-based backends are the
+// caller's responsibility: swan.NewFramedWire converts a byte stream into
+// this contract with a [2-byte length][payload] frame convention of its
+// own (that framing is not part of the swan wire; only stream adapters
+// speak it).
 //
 // # NAT-T classification
 //
@@ -36,9 +38,9 @@
 //     via (*Packet).Release.
 //   - TxWorker: the single writer of the session. Every producer (control
 //     handshake/running, ESP outbound) submits *Frame values; the worker
-//     adds framing, applies the non-ESP marker for IKE, and coalesces up to
-//     32 additional queued frames after the first into one stream Write
-//     without reordering them.
+//     shapes payloads (non-ESP marker for IKE, 0xff keepalive) and sends
+//     each as one datagram Write in FIFO order; wires implementing
+//     batchWriter get up to 32 frames per WriteBatch call.
 //
 // Only these two workers touch the wire. Close asks a worker to stop but
 // never closes the injected stream; a fully blocking wire Read can only be

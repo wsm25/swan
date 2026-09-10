@@ -29,36 +29,31 @@ that stream and returns an `io.ReadWriteCloser` that carries raw IP packets.
   implemented.
 - ESP transport for raw IP packets with replay protection.
 
-## Wire framing
+## Wire contract
 
-The injected stream carries frames of:
-
-```text
-[2-byte big-endian length][payload]
-```
-
-`payload` is exactly the bytes that would appear in one UDP datagram after
-NAT-T framing:
+The injected wire is an `io.ReadWriteCloser` with datagram semantics, exactly
+like a connected `*net.UDPConn`: one `Read` returns one complete datagram,
+one `Write` sends one complete datagram. `payload` is exactly the bytes that
+would appear in one UDP datagram after NAT-T framing:
 
 - one `0xff` byte for a NAT-T keepalive (consumed inside the library);
 - four zero bytes (non-ESP marker) followed by an IKE message;
 - a raw ESP datagram (UDP-encapsulated, no marker).
 
-`NewFrameConn` adapts a connected `net.PacketConn` (UDP or any other
-datagram transport) into this framed stream: each datagram read becomes one
-frame and each frame written becomes one datagram, so callers never hand
-raw datagrams to the library by mistake.
+Datagram backends (UDP) are already this contract; `NewPacketWire` adapts a
+`net.PacketConn` when it does not implement `io.ReadWriteCloser` on its own.
+Stream-based backends (TCP/TLS/pipes) must convert their own strip/packet
+boundaries: `NewFramedWire` adapts a byte stream into this contract with a
+private `[2-byte big-endian length][payload]` frame convention of its own
+(that framing is not part of the swan wire; only stream adapters speak it).
 
-The reader accumulates until the declared length arrives. A partial frame is
-`io.ErrUnexpectedEOF`; a declared length over 65535 is a decode error. The
-single writer adds the length prefix and the non-ESP marker for IKE.
 
 ## Packages
 
 | package | what it does |
 | --- | --- |
 | `swan` | public API: `Config`, `Session`, `Tunnel`, events |
-| `github.com/wsm25/swan/transport` | stream framing, NAT-T classification, batching workers |
+| `github.com/wsm25/swan/transport` | datagram NAT-T classification, batching workers |
 | `github.com/wsm25/swan/wire` | IKEv2 header and payload encode/decode |
 | `github.com/wsm25/swan/xcrypto` | DH, PRF, hashing, ciphers, x509, key scheduling |
 | `github.com/wsm25/swan/control` | handshake state machine, retransmission, keepalives, close |
@@ -90,9 +85,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer conn.Close()
-	// ANY datagram transport works as long as it is framed: each datagram
-	// becomes one [2-byte big-endian length][payload] frame.
-	wire := swan.NewFrameConn(conn.(net.PacketConn))
+	// A connected UDP conn already has the wire's datagram semantics;
+	// NewPacketWire is the bridge for PacketConn-only backends.
+	wire := swan.NewPacketWire(conn.(net.PacketConn))
 
 	cfg := swan.DefaultConfig(net.ParseIP("1.2.3.4"))
 	ike, esp, err := swan.ParseStrongswanProposals(

@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
@@ -18,26 +17,26 @@ const (
 	// rxBatchFlush bounds how long a partially filled ESP batch waits for
 	// more packets before it is delivered.
 	rxBatchFlush = 200 * time.Microsecond
-	// writeBatch is how many additional frames TxWorker drains after the
-	// first one before coalescing them into a single wire Write.
+	// writeBatch is how many frames TxWorker drains and hands to a
+	// batchWriter in one call when the wire supports it.
 	writeBatch = 32
 )
 
-// rxPoolBufSize is the pooled receive buffer class. Frames larger than this
-// still work: ReadFrame allocates a bigger backing array on demand and the
-// release hook recycles that larger array instead of the pool class.
-const rxPoolBufSize = 4096
+// rxPoolBufSize is the pooled receive buffer class: MaxWireDatagram so
+// one datagram Read can never run out of buffer for legal traffic.
+const rxPoolBufSize = 1 << 16
 
-// RxWorker owns all reads from the injected stream wire. It accumulates
-// frames, classifies payloads, strips the non-ESP marker from IKE and
-// forwards each packet (with ownership transfer) to exactly one of:
+// RxWorker owns all reads from the injected wire (io.ReadWriteCloser with
+// datagram Read/Write semantics, same as *net.UDPConn). It classifies
+// datagrams, strips the non-ESP marker from IKE and forwards each packet
+// (with ownership transfer) to exactly one of:
 //
 //	ctl: control-plane IKE packets   (collected by the control demux worker)
 //	esp: ENC/ESP datagrams           (collected by the esp inbound worker)
 //
 // Control packets are delivered singly as they arrive. ESP packets are
 // delivered to esp in batches of up to rxBatch packets: a reader goroutine
-// owns the blocking ReadFrame calls and feeds classified ESP packets to the
+// owns the blocking wire Read calls and feeds classified ESP packets to the
 // Run loop, which flushes a batch either when it fills or after rxBatchFlush
 // of quiescence. Keepalives are consumed (counted) here and never delivered.
 // Pooled packet buffers return to the pool via (*Packet).Release; packets
@@ -157,18 +156,22 @@ func (w *RxWorker) Run() error {
 	}
 }
 
-// read is the single reader goroutine. All blocking ReadFrame calls happen
-// here so Run's select can keep flushing batches on the ticker. It exits
-// when Close is requested (observed before a read or after the read yields),
-// when the wire ends, or when a read fails.
+// read is the single reader goroutine. All blocking wire Read calls happen
+// here so Run's select can keep flushing batches on the ticker. A wire
+// implementing batchReader takes the batch path; both exit when Close is
+// requested (observed before a read or after the read yields), when the
+// wire ends, or when a read fails.
 func (w *RxWorker) read(packets chan<- *Packet, readErr chan<- error) {
+	if br, ok := w.wire.(batchReader); ok {
+		w.readBatched(br, packets, readErr)
+		return
+	}
 	for {
 		if w.requestedClose() {
 			return
 		}
-
 		buf := w.pool.Get().([]byte)
-		frame, err := ReadFrame(w.wire, buf)
+		n, err := w.wire.Read(buf)
 		if err != nil {
 			w.pool.Put(buf)
 			if err == io.EOF && w.requestedClose() {
@@ -180,42 +183,99 @@ func (w *RxWorker) read(packets chan<- *Packet, readErr chan<- error) {
 			}
 			return
 		}
+		if !w.classifyAndDeliver(buf[:n], buf, packets) {
+			return
+		}
+	}
+}
 
-		// frame.Payload aliases buf when it fitted the pool class, or a
-		// fresh larger array otherwise. Reconstruct the full backing slice
-		// before any marker stripping so Release returns the whole buffer.
-		backing := frame.Payload[:cap(frame.Payload)]
-
-		switch frame.Kind {
-		case KindKeepalive:
-			w.keepalives++
-			w.pool.Put(backing)
-			continue
-		case KindIKE:
-			// Classify guarantees at least NonESPMarkerLen marker bytes.
-			payload := frame.Payload[NonESPMarkerLen:]
-			pkt := &Packet{
-				Kind:    KindIKE,
-				Payload: payload,
-				release: func() { w.pool.Put(backing) },
+// readBatched is the batchReader fast path: fill all pooled buffers with
+// one ReadBatch call, classify each datagram in order, and reuse the single
+// read path semantics for keepalives, ctl delivery, and the ESP batch
+// pipeline.
+func (w *RxWorker) readBatched(br batchReader, packets chan<- *Packet, readErr chan<- error) {
+	bufs := make([][]byte, rxBatch)
+	sizes := make([]int, rxBatch)
+	// returnUnfilled hands back every slot from from on: slots the current
+	// batch never filled AND slots skipped after a mid-batch abort.
+	returnUnfilled := func(from int) {
+		for j := from; j < len(bufs); j++ {
+			if bufs[j] != nil {
+				w.pool.Put(bufs[j])
+				bufs[j] = nil
 			}
-			if !w.deliver(w.ctl, pkt) {
-				pkt.Release()
-				return
-			}
-		case KindESP:
-			pkt := &Packet{
-				Kind:    KindESP,
-				Payload: frame.Payload,
-				release: func() { w.pool.Put(backing) },
-			}
-			select {
-			case packets <- pkt:
-			case <-w.closed:
-				pkt.Release()
+		}
+	}
+	for {
+		if w.requestedClose() {
+			return
+		}
+		for i := range bufs {
+			bufs[i] = w.pool.Get().([]byte)
+		}
+		n, err := br.ReadBatch(bufs, sizes)
+		// recvmmsg-style semantics: datagrams [0,n) are valid even when an
+		// error accompanies them. Classify them first, then surface err.
+		for i := 0; i < n; i++ {
+			backing := bufs[i]
+			bufs[i] = nil // consumed below or released inside on close
+			if !w.classifyAndDeliver(backing[:sizes[i]], backing, packets) {
+				returnUnfilled(i + 1)
 				return
 			}
 		}
+		returnUnfilled(n)
+		if err != nil {
+			if err == io.EOF && w.requestedClose() {
+				return
+			}
+			select {
+			case readErr <- err:
+			case <-w.closed:
+			}
+			return
+		}
+	}
+}
+
+// classifyAndDeliver runs the single-datagram pipeline: keepalives are
+// consumed, IKE goes to ctl one at a time, ESP goes to the batch channel.
+// It returns false once the worker is closed and the caller must stop.
+func (w *RxWorker) classifyAndDeliver(payload, backing []byte, packets chan<- *Packet) bool {
+	switch Classify(payload) {
+	case KindKeepalive:
+		w.keepalives++
+		w.pool.Put(backing)
+		return true
+	case KindIKE:
+		// Classify guarantees at least NonESPMarkerLen marker bytes.
+		body := payload[NonESPMarkerLen:]
+		pkt := &Packet{
+			Kind:    KindIKE,
+			Payload: body,
+			release: func() { w.pool.Put(backing) },
+		}
+		if !w.deliver(w.ctl, pkt) {
+			pkt.Release()
+			return false
+		}
+		return true
+	case KindESP:
+		pkt := &Packet{
+			Kind:    KindESP,
+			Payload: payload,
+			release: func() { w.pool.Put(backing) },
+		}
+		select {
+		case packets <- pkt:
+			return true
+		case <-w.closed:
+			pkt.Release()
+			return false
+		}
+	default:
+		w.pool.Put(backing)
+		return true
 	}
 }
 
@@ -280,14 +340,10 @@ type TxWorker struct {
 	closed    chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
-
-	// buf is the worker's reusable framing scratch buffer. It is only used
-	// on this single goroutine and is never retained past a Write return.
-	buf []byte
 }
 
-// NewTxWorker binds the stream side of the wire and the shared outbound
-// queue. The queue must be bounded.
+// NewTxWorker binds the wire (datagram Write semantics) and the shared
+// outbound queue. The queue must be bounded.
 func NewTxWorker(wire io.Writer, frames <-chan *Frame) *TxWorker {
 	return &TxWorker{
 		wire:   wire,
@@ -298,13 +354,15 @@ func NewTxWorker(wire io.Writer, frames <-chan *Frame) *TxWorker {
 }
 
 // Run writes frames until Close, a channel close, or a write failure.
-// Consecutive queued frames are coalesced into one wire Write (up to
-// writeBatch additional frames after the first) while preserving FIFO
-// order. On Close it drains the frames already queued one at a time
-// (without blocking for more) and exits; producers stop sending after Close
-// is called.
+// Every frame is one datagram Write; when the wire implements batchWriter
+// the worker drains up to writeBatch frames per FIFO burst and hands them
+// to WriteBatch as a list. On Close it drains the frames already queued one
+// at a time (without blocking for more) and exits; producers stop sending
+// after Close is called.
 func (w *TxWorker) Run() error {
 	defer close(w.done)
+
+	bw, batched := w.wire.(batchWriter)
 
 	for {
 		select {
@@ -332,8 +390,16 @@ func (w *TxWorker) Run() error {
 				}
 			}
 		write:
-			if err := w.writeFrames(frames); err != nil {
-				return err
+			if batched {
+				if err := w.writeBatch(frames, bw); err != nil {
+					return err
+				}
+			} else {
+				for _, frame := range frames {
+					if err := w.writeFrame(frame); err != nil {
+						return err
+					}
+				}
 			}
 		case <-w.closed:
 			for {
@@ -356,8 +422,8 @@ func (w *TxWorker) Run() error {
 	}
 }
 
-// writeFrame writes a single frame (one system Write) and releases it. It
-// is the Close-drain path; the main loop uses writeFrames.
+// writeFrame writes one shaped datagram and releases the frame. It is the
+// Close-drain path and the per-frame fallback.
 func (w *TxWorker) writeFrame(f *Frame) error {
 	defer f.Release()
 
@@ -365,54 +431,60 @@ func (w *TxWorker) writeFrame(f *Frame) error {
 	if err != nil {
 		return err
 	}
-	n := FrameHeaderSize + len(body)
-	if cap(w.buf) < n {
-		w.buf = make([]byte, n)
-	}
-	buf := w.buf[:n]
-	binary.BigEndian.PutUint16(buf[:FrameHeaderSize], uint16(len(body)))
-	copy(buf[FrameHeaderSize:], body)
-	return writeAll(w.wire, buf)
+	return writeAll(w.wire, body)
 }
 
-// writeFrames writes a group of frames as one concatenated stream in a
-// single wire Write, then releases every frame exactly once (on success and
-// on error). Frame order in the group is the FIFO order the channel
-// delivered them in.
-func (w *TxWorker) writeFrames(frames []*Frame) error {
+// writeAll iterates until every byte is written.
+func writeAll(w io.Writer, b []byte) error {
+	for len(b) > 0 {
+		n, err := w.Write(b)
+		if n < 0 || n > len(b) {
+			return fmt.Errorf("github.com/wsm25/swan/transport: invalid write count %d", n)
+		}
+		b = b[n:]
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+// writeBatch shapes a FIFO frame group, releases every frame exactly once
+// (writes may legally be partial), and hands the datagrams to the wire's
+// WriteBatch until all are accepted.
+func (w *TxWorker) writeBatch(frames []*Frame, bw batchWriter) error {
 	defer func() {
 		for _, f := range frames {
 			f.Release()
 		}
 	}()
 
-	var total int
+	bodies := make([][]byte, 0, len(frames))
 	for _, f := range frames {
 		body, err := shapedPayload(f)
 		if err != nil {
 			return err
 		}
-		total += FrameHeaderSize + len(body)
+		bodies = append(bodies, body)
 	}
-	if cap(w.buf) < total {
-		w.buf = make([]byte, total)
-	}
-	buf := w.buf[:total]
-	for _, f := range frames {
-		body, err := shapedPayload(f)
+	written := 0
+	for written < len(bodies) {
+		n, err := bw.WriteBatch(bodies[written:])
+		if n < 0 || n > len(bodies)-written {
+			return fmt.Errorf("github.com/wsm25/swan/transport: invalid batch write count %d", n)
+		}
+		written += n
 		if err != nil {
-			// Already validated above; keep the error path exact.
 			return err
 		}
-		n := FrameHeaderSize + len(body)
-		if len(buf) < n {
-			return fmt.Errorf("github.com/wsm25/swan/transport: coalesced frame accounting mismatch")
+		if n == 0 {
+			return io.ErrShortWrite
 		}
-		binary.BigEndian.PutUint16(buf[:FrameHeaderSize], uint16(len(body)))
-		copy(buf[FrameHeaderSize:], body)
-		buf = buf[n:]
 	}
-	return writeAll(w.wire, w.buf[:total])
+	return nil
 }
 
 // shapedPayload applies NAT-T framing per kind: keepalive is the single
@@ -423,16 +495,16 @@ func shapedPayload(f *Frame) ([]byte, error) {
 		return []byte{0xff}, nil
 	case KindIKE:
 		total := NonESPMarkerLen + len(f.Payload)
-		if total > MaxFramePayload {
-			return nil, fmt.Errorf("github.com/wsm25/swan/transport: ike frame payload %d exceeds limit %d", total, MaxFramePayload)
+		if total > MaxWireDatagram {
+			return nil, fmt.Errorf("github.com/wsm25/swan/transport: ike frame payload %d exceeds limit %d", total, MaxWireDatagram)
 		}
 		body := make([]byte, total)
 		copy(body[NonESPMarkerLen:], f.Payload)
 		return body, nil
 	default:
 		body := f.Payload
-		if len(body) > MaxFramePayload {
-			return nil, fmt.Errorf("github.com/wsm25/swan/transport: esp frame payload %d exceeds limit %d", len(body), MaxFramePayload)
+		if len(body) > MaxWireDatagram {
+			return nil, fmt.Errorf("github.com/wsm25/swan/transport: esp frame payload %d exceeds limit %d", len(body), MaxWireDatagram)
 		}
 		return body, nil
 	}

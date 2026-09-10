@@ -60,6 +60,43 @@ type Tunnel struct {
 // Read implements io.Reader with one-packet granularity (see Tunnel doc).
 // It returns io.EOF once the tunnel is closed and its inbound queue drained.
 func (t *Tunnel) Read(p []byte) (int, error) {
+	return t.read(p, true)
+}
+
+// ReadBatch fills up to len(bufs) packets, one per buffer, with the same
+// copy semantics as Read: the first packet awaits the inbound queue
+// (blocking), every following packet is only taken if already queued. A
+// non-blocking call with an empty queue returns (n, nil). io.EOF appears
+// once the tunnel has closed and its queue drained. Callers should size
+// every buffer to hold one full packet (MaxWireDatagram is always safe),
+// otherwise a larger packet's remainder spills into the next buffer. A
+// zero-length buffer routes the whole packet into the pending remainder
+// instead of consuming it.
+func (t *Tunnel) ReadBatch(bufs [][]byte) (int, error) {
+	if t == nil {
+		return 0, io.EOF
+	}
+	if len(bufs) == 0 {
+		return 0, nil
+	}
+	n := 0
+	for n < len(bufs) {
+		got, err := t.read(bufs[n], n == 0)
+		if got > 0 {
+			n++
+			continue
+		}
+		if err != nil {
+			return n, err
+		}
+		return n, nil // queue empty in non-blocking mode
+	}
+	return n, nil
+}
+
+// read is Read with a blocking switch: block=true waits for the next
+// inbound batch, block=false drains only what is already queued.
+func (t *Tunnel) read(p []byte, block bool) (int, error) {
 	if t == nil {
 		return 0, io.EOF
 	}
@@ -91,6 +128,9 @@ func (t *Tunnel) Read(p []byte) (int, error) {
 			t.pendingBatch = batch
 			continue
 		default:
+		}
+		if !block {
+			return 0, nil
 		}
 		select {
 		case <-t.closed:

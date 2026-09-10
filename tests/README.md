@@ -1,9 +1,9 @@
 # swan4 integration tests
 
 A small self-contained harness that runs swan4 against a real strongSwan
-server container. The library itself stays backend-free: the UDP socket and
-the stream framing for the injected `io.ReadWriteCloser` live only in the
-test clients under `tests/client`.
+server container. The library itself stays backend-free: the UDP socket
+(the wire already has datagram semantics) lives only in the test clients
+under `tests/client`.
 
 ## Layout
 
@@ -20,7 +20,7 @@ tests/
 ├── udpsink/          responder-side UDP benchmark counter/pump (Go)
 └── client/           Go debug client and tunnel benchmarks
     ├── go.mod            module swan4-tests (replace github.com/wsm25/swan => ../..)
-    ├── wiretest/         UDP socket -> swan stream framing adapter
+    ├── wiretest/         UDP socket -> swan datagram wire
     ├── main.go           handshake runner + ICMP echo responder (debug client)
     └── udpbench/         ESP tunnel UDP throughput benchmark
 ```
@@ -72,9 +72,9 @@ SSL_CERT_FILE=../docker/certs/caCert.pem
 
 ## 2) Run the Go debug client
 
-The debug client owns a real UDP socket and wraps datagrams into the swan
-stream framing (`[u16 len][payload]`) before handing the
-`io.ReadWriteCloser` to the library:
+The debug client owns a real UDP socket and hands it to the library as-is:
+the wire contract is one datagram per Read/Write, which a connected
+`*net.UDPConn` satisfies natively:
 
 ```bash
 cd tests/client
