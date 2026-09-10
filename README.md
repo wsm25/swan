@@ -169,10 +169,12 @@ func main() {
 
 ## Limitations
 
-- Simultaneous CHILD_SA rekey (a peer rekey arrives while our child rekey is
-  in flight) is answered with `TEMPORARY_FAILURE`; the peer retries later.
-  Consensus-close-out by lowest nonce (RFC 7296 2.17 behavior) is not
-  implemented.
+- Simultaneous rekey collision (RFC 7296 2.8.1/2.8.2): the two in-flight
+  exchange nonces are compared bytewise; the smaller nonce loses. When we
+  lose we abandon our rekey and accept the peer's rekey; when we win (or
+  the nonces are equal) we answer `TEMPORARY_FAILURE` and the peer
+  concludes. A real on-wire collision was not observed in local tests;
+  coverage for the decision paths is unit-level.
 - The old inbound CHILD_SA context is dropped when the peer acknowledges the
   old child deletion (strongSwan sends it); there is no additional hard time
   bound if a peer stays silent after a rekey.

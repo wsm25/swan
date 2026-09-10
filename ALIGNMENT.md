@@ -274,9 +274,10 @@ Current behavior:
 - DELETE ESP (exactly one 4-byte SPI) must equal `ActiveChild.OutboundSPI`:
   the child is cleared, `childClosed` is closed, and the ESP pipeline ends
   the tunnel surface while IKE keeps running. Unknown SPIs are dropped.
-- CREATE_CHILD_SA rekeys (CHILD and IKE, peer-initiated) are accepted;
-  simultaneous child rekey (theirs in flight while ours is) receives
-  `TEMPORARY_FAILURE` and the peer retries.
+- CREATE_CHILD_SA rekeys (CHILD and IKE, peer-initiated) are accepted.
+  Simultaneous rekey collision: bytewise nonce comparison, smaller nonce
+  loses — loser abandons and accepts the peer rekey; winner (and the
+  infeasible equal-nonce case) answers `TEMPORARY_FAILURE`.
 - every packet is released exactly once.
 
 4.5 close:

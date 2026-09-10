@@ -125,16 +125,58 @@ func (r *Running) abandonRekey(retry bool) {
 		st.Rekey.LocalDH = nil
 		st.Rekey.LocalKE = nil
 		st.Rekey.Ni = nil
+		st.Rekey.NewNonceN = nil
+		st.Rekey.NewSelection = nil
+		st.Rekey.NewIKEKeys = nil
+		st.Rekey.OldChild = nil
+		st.Rekey.NewChild = nil
 		st.Rekey.PeerPassive = nil
 	}
 	st.Rekey = nil
 	st.OutboundRequest = nil
 	st.InboundFragments = nil
+	st.OldChild = nil
+	st.OldIKE = st.OldIKE[:0]
 	st.HasExpectedResponse = false
 	st.Phase = PhaseRunning
 	if retry && r.retryTimer != nil {
 		armTimer(r.retryTimer, retryBackoff(r.cfg.Rekey.RetryInterval))
 	}
+}
+
+// sendCreateChildTemporaryFailure responds to a peer CREATE_CHILD_SA with a
+// TEMPORARY_FAILURE notify and caches the exact response for replay.
+// RFC 7296 2.25 permits this for a collision the peer must retry after a
+// short delay.
+func (r *Running) sendCreateChildTemporaryFailure(ctx context.Context, tx chan<- *transport.Frame, msg *wire.Message) error {
+	body := payload.AppendNotify(nil, payload.Notify{ProtocolID: wire.NotifyProtocolNone, Type: wire.NotifyTemporaryFailure})
+	frames, err := buildProtectedStateAs(r.cfg, r.state, wire.ExchangeCreateChild, msg.Header.MessageID, wire.PayloadTypeNotify, cepSinglePayload(body), responseFlags(stateIKEEnvelope(r.state)))
+	if err != nil {
+		return err
+	}
+	if err := r.sendFrames(ctx, tx, frames); err != nil {
+		return err
+	}
+	r.rememberResponse(msg.Header.MessageID, frames)
+	return nil
+}
+
+// firstInnerNonce returns a copy of the first NONCE body in a decrypted
+// inner payload chain. It only exists to resolve a simultaneous rekey
+// collision before the full proposal validation path runs.
+func firstInnerNonce(inner []wire.Payload) ([]byte, bool) {
+	for i := range inner {
+		p := &inner[i]
+		if p.Type != wire.PayloadTypeNonce {
+			continue
+		}
+		n, err := payload.ParseNonce(p.Body)
+		if err != nil {
+			return nil, false
+		}
+		return append([]byte(nil), n...), true
+	}
+	return nil, false
 }
 
 // installChild asks the public Session data plane to atomically install a
@@ -548,18 +590,26 @@ func (r *Running) processPeerChildRekey(ctx context.Context, tx chan<- *transpor
 	}
 
 	if st.Rekey != nil && st.Rekey.Kind == RekeyChild {
-		// Collision window: keep the old child installed and refuse with a
-		// temporary failure so the peer retries after our own rekey settles.
-		body := payload.AppendNotify(nil, payload.Notify{ProtocolID: wire.NotifyProtocolNone, Type: wire.NotifyTemporaryFailure})
-		frames, err := buildProtectedStateAs(r.cfg, st, wire.ExchangeCreateChild, msg.Header.MessageID, wire.PayloadTypeNotify, cepSinglePayload(body), responseFlags(stateIKEEnvelope(st)))
-		if err != nil {
-			return err
+		switch decideNonceCollision(st.Rekey.Ni, peerNi) {
+		case CollisionWeLose:
+			// RFC 7296 2.8.1: the peer's nonce wins. Abandon our
+			// half-open child rekey and let the peer request complete
+			// through the normal accept path below.
+			//
+			// Ordering guarantee: in the current running-actor window
+			// our replacement child is never installed while
+			// RekeyContext is non-nil (finishChildRekeyResponse installs
+			// it and immediately clears Rekey), so there is no redundant
+			// installed child to delete. If that window ever widens, the
+			// redundant child DELETE must be sent only after the peer's
+			// winning child has been installed by the code below -- never
+			// before -- so ActiveChild never dangles.
+			r.abandonRekey(false)
+		default:
+			// CollisionWeWin and the equal-nonce special case keep the
+			// existing TEMPORARY_FAILURE response (RFC 7296 2.8.1).
+			return r.sendCreateChildTemporaryFailure(ctx, tx, msg)
 		}
-		if err := r.sendFrames(ctx, tx, frames); err != nil {
-			return err
-		}
-		r.rememberResponse(msg.Header.MessageID, frames)
-		return nil
 	}
 
 	responseSPI, err := generateChildSPI()
@@ -655,17 +705,31 @@ func selectedPeerOutboundSPI(sa payload.SA) uint32 {
 // 2.8.2), so our future requests omit FlagInitiator and use SKer/SKar.
 func (r *Running) processPeerIKERekey(ctx context.Context, tx chan<- *transport.Frame, msg *wire.Message, inner []wire.Payload) error {
 	st := r.state
-	if st.Rekey != nil || len(st.OldIKE) > 0 {
-		body := payload.AppendNotify(nil, payload.Notify{ProtocolID: wire.NotifyProtocolNone, Type: wire.NotifyTemporaryFailure})
-		frames, err := buildProtectedStateAs(r.cfg, st, wire.ExchangeCreateChild, msg.Header.MessageID, wire.PayloadTypeNotify, cepSinglePayload(body), responseFlags(stateIKEEnvelope(st)))
-		if err != nil {
-			return err
+
+	// Collision resolution only applies against our own half-open IKE
+	// rekey. Any other half-open work (our child rekey, or a replacement
+	// IKE SA whose old-SA DELETE is outstanding) still refuses with
+	// TEMPORARY_FAILURE so the actor never builds two new IKE SAs at once.
+	if st.Rekey != nil && st.Rekey.Kind == RekeyIke {
+		peerNi, ok := firstInnerNonce(inner)
+		if !ok {
+			return r.sendCreateChildTemporaryFailure(ctx, tx, msg)
 		}
-		if err := r.sendFrames(ctx, tx, frames); err != nil {
-			return err
+		switch decideNonceCollision(st.Rekey.Ni, peerNi) {
+		case CollisionWeLose:
+			// RFC 7296 2.8.2: the peer's nonce wins. Abandon our
+			// half-open IKE rekey; our replacement IKE SA is not
+			// installed while RekeyContext is non-nil, so there is no
+			// redundant IKE SA to delete. The peer request then
+			// completes through the normal accept path below.
+			r.abandonRekey(false)
+		default:
+			// CollisionWeWin and the equal-nonce special case keep the
+			// existing TEMPORARY_FAILURE response (RFC 7296 2.8.2).
+			return r.sendCreateChildTemporaryFailure(ctx, tx, msg)
 		}
-		r.rememberResponse(msg.Header.MessageID, frames)
-		return nil
+	} else if st.Rekey != nil || len(st.OldIKE) > 0 {
+		return r.sendCreateChildTemporaryFailure(ctx, tx, msg)
 	}
 
 	var saPayload *payload.SA
