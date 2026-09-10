@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	utls "github.com/refraction-networking/utls"
+	utls "github.com/metacubex/utls"
 )
 
 // TLS engine for PEAP, aligned with the strongSwan PEAP tls path.
@@ -106,14 +106,14 @@ type Engine struct {
 func NewEngine(serverName string, opts Options, roots *x509.CertPool) (*Engine, error) {
 	clean := normalizeServerName(serverName)
 	if clean == "" {
-		return nil, errors.New("swan/eap/peap: empty PEAP TLS server name")
+		return nil, errors.New("github.com/wsm25/swan/eap/peap: empty PEAP TLS server name")
 	}
 	pool := roots
 	if pool == nil && !opts.InsecureSkipVerify {
 		var err error
 		pool, err = x509.SystemCertPool()
 		if err != nil {
-			return nil, fmt.Errorf("swan/eap/peap: load system cert pool: %w", err)
+			return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: load system cert pool: %w", err)
 		}
 	}
 	cfg := &utls.Config{
@@ -130,12 +130,12 @@ func NewEngine(serverName string, opts Options, roots *x509.CertPool) (*Engine, 
 			for _, raw := range rawCerts {
 				cert, err := x509.ParseCertificate(raw)
 				if err != nil {
-					return fmt.Errorf("swan/eap/peap: parse server certificate: %w", err)
+					return fmt.Errorf("github.com/wsm25/swan/eap/peap: parse server certificate: %w", err)
 				}
 				certs = append(certs, cert)
 			}
 			if len(certs) == 0 {
-				return errors.New("swan/eap/peap: server sent no certificate")
+				return errors.New("github.com/wsm25/swan/eap/peap: server sent no certificate")
 			}
 			intermediates := x509.NewCertPool()
 			for _, cert := range certs[1:] {
@@ -148,10 +148,10 @@ func NewEngine(serverName string, opts Options, roots *x509.CertPool) (*Engine, 
 				KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 			}
 			if _, err := leaf.Verify(opts); err != nil {
-				return fmt.Errorf("swan/eap/peap: verify server certificate chain: %w", err)
+				return fmt.Errorf("github.com/wsm25/swan/eap/peap: verify server certificate chain: %w", err)
 			}
 			if err := leaf.VerifyHostname(clean); err != nil {
-				return fmt.Errorf("swan/eap/peap: server certificate identity %q: %w", clean, err)
+				return fmt.Errorf("github.com/wsm25/swan/eap/peap: server certificate identity %q: %w", clean, err)
 			}
 			return nil
 		},
@@ -183,7 +183,7 @@ func (e *Engine) Start() ([]byte, error) {
 		return nil, err
 	}
 	if !got {
-		return nil, fmt.Errorf("swan/eap/peap: TLS handshake produced no ClientHello: %w", err)
+		return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: TLS handshake produced no ClientHello: %w", err)
 	}
 	return out, nil
 }
@@ -192,10 +192,10 @@ func (e *Engine) Start() ([]byte, error) {
 // collector) and returns outbound records plus the new step.
 func (e *Engine) Feed(record []byte) (outbound []byte, step Step, err error) {
 	if !e.started {
-		return nil, StepNeedMoreData, errors.New("swan/eap/peap: TLS engine not started")
+		return nil, StepNeedMoreData, errors.New("github.com/wsm25/swan/eap/peap: TLS engine not started")
 	}
 	if e.established.Load() {
-		return nil, StepEstablished, errors.New("swan/eap/peap: TLS handshake already established; use Unprotect")
+		return nil, StepEstablished, errors.New("github.com/wsm25/swan/eap/peap: TLS handshake already established; use Unprotect")
 	}
 	if len(record) == 0 {
 		return nil, StepNeedMoreData, nil
@@ -203,7 +203,7 @@ func (e *Engine) Feed(record []byte) (outbound []byte, step Step, err error) {
 	select {
 	case e.inbound <- append([]byte(nil), record...):
 	case <-e.stop:
-		return nil, StepNeedMoreData, errors.New("swan/eap/peap: TLS engine closed")
+		return nil, StepNeedMoreData, errors.New("github.com/wsm25/swan/eap/peap: TLS engine closed")
 	}
 	out, est, _, colErr := e.collect(collectFirstWait)
 	if colErr != nil {
@@ -229,15 +229,15 @@ func (e *Engine) Established() bool {
 func (e *Engine) VerifyServerIdentity(name string) error {
 	clean := normalizeServerName(name)
 	if clean == "" {
-		return errors.New("swan/eap/peap: empty TLS server identity")
+		return errors.New("github.com/wsm25/swan/eap/peap: empty TLS server identity")
 	}
 	state := e.client.ConnectionState()
 	if len(state.PeerCertificates) == 0 {
-		return errors.New("swan/eap/peap: missing TLS peer certificate")
+		return errors.New("github.com/wsm25/swan/eap/peap: missing TLS peer certificate")
 	}
 	cert := state.PeerCertificates[0]
 	if err := cert.VerifyHostname(clean); err != nil {
-		return fmt.Errorf("swan/eap/peap: TLS server identity %q: %w", clean, err)
+		return fmt.Errorf("github.com/wsm25/swan/eap/peap: TLS server identity %q: %w", clean, err)
 	}
 	return nil
 }
@@ -246,11 +246,11 @@ func (e *Engine) VerifyServerIdentity(name string) error {
 // the TLS record bytes.
 func (e *Engine) Protect(plain []byte) ([]byte, error) {
 	if !e.established.Load() {
-		return nil, errors.New("swan/eap/peap: TLS tunnel is not ready")
+		return nil, errors.New("github.com/wsm25/swan/eap/peap: TLS tunnel is not ready")
 	}
 	n, err := e.client.Write(plain)
 	if err != nil {
-		return nil, fmt.Errorf("swan/eap/peap: TLS protect: %w", err)
+		return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: TLS protect: %w", err)
 	}
 	if n != len(plain) {
 		return nil, io.ErrShortWrite
@@ -262,12 +262,12 @@ func (e *Engine) Protect(plain []byte) ([]byte, error) {
 // multiple complete plaintext chunks).
 func (e *Engine) Unprotect(record []byte) ([]byte, error) {
 	if !e.established.Load() {
-		return nil, errors.New("swan/eap/peap: TLS tunnel is not ready")
+		return nil, errors.New("github.com/wsm25/swan/eap/peap: TLS tunnel is not ready")
 	}
 	select {
 	case e.inbound <- append([]byte(nil), record...):
 	case <-e.stop:
-		return nil, errors.New("swan/eap/peap: TLS engine closed")
+		return nil, errors.New("github.com/wsm25/swan/eap/peap: TLS engine closed")
 	}
 	return e.readApplication()
 }
@@ -276,7 +276,7 @@ func (e *Engine) Unprotect(record []byte) ([]byte, error) {
 // comment; it returns an error before Established.
 func (e *Engine) ExportMSK() ([]byte, error) {
 	if !e.established.Load() {
-		return nil, errors.New("swan/eap/peap: TLS tunnel is not ready")
+		return nil, errors.New("github.com/wsm25/swan/eap/peap: TLS tunnel is not ready")
 	}
 	state := e.client.ConnectionState()
 	if state.Version >= tls.VersionTLS13 {
@@ -286,10 +286,10 @@ func (e *Engine) ExportMSK() ([]byte, error) {
 		}
 		keymat, err := state.ExportKeyingMaterial(label, context, length)
 		if err != nil {
-			return nil, fmt.Errorf("swan/eap/peap: export EAP MSK: %w", err)
+			return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: export EAP MSK: %w", err)
 		}
 		if len(keymat) < MSKLen {
-			return nil, fmt.Errorf("swan/eap/peap: exporter returned %d bytes, need %d", len(keymat), MSKLen)
+			return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: exporter returned %d bytes, need %d", len(keymat), MSKLen)
 		}
 		return keymat[:MSKLen], nil
 	}
@@ -299,14 +299,14 @@ func (e *Engine) ExportMSK() ([]byte, error) {
 	// standard ConnectionState exporter refuses to run.
 	hs := e.client.HandshakeState
 	if len(hs.MasterSecret) == 0 || hs.Hello == nil || hs.ServerHello == nil {
-		return nil, errors.New("swan/eap/peap: TLS 1.2 handshake state unavailable for MSK export")
+		return nil, errors.New("github.com/wsm25/swan/eap/peap: TLS 1.2 handshake state unavailable for MSK export")
 	}
 	seed := make([]byte, 0, len(hs.Hello.Random)+len(hs.ServerHello.Random))
 	seed = append(seed, hs.Hello.Random...)
 	seed = append(seed, hs.ServerHello.Random...)
 	keymat := e.tls12PRF(hs.MasterSecret, ExportLabelCompat, seed, MSKLen)
 	if len(keymat) < MSKLen {
-		return nil, fmt.Errorf("swan/eap/peap: TLS 1.2 PRF produced %d bytes, need %d", len(keymat), MSKLen)
+		return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: TLS 1.2 PRF produced %d bytes, need %d", len(keymat), MSKLen)
 	}
 	return keymat[:MSKLen], nil
 }
@@ -607,7 +607,7 @@ func (e *Engine) readApplication() ([]byte, error) {
 			deadline = time.Second
 		}
 		if err := e.client.SetReadDeadline(time.Now().Add(deadline)); err != nil {
-			return plain, fmt.Errorf("swan/eap/peap: TLS read deadline: %w", err)
+			return plain, fmt.Errorf("github.com/wsm25/swan/eap/peap: TLS read deadline: %w", err)
 		}
 		n, err := e.client.Read(buf)
 		if n > 0 {
@@ -624,7 +624,7 @@ func (e *Engine) readApplication() ([]byte, error) {
 			if err == io.EOF {
 				return plain, nil
 			}
-			return plain, fmt.Errorf("swan/eap/peap: TLS unprotect: %w", err)
+			return plain, fmt.Errorf("github.com/wsm25/swan/eap/peap: TLS unprotect: %w", err)
 		}
 	}
 }

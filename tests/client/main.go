@@ -20,8 +20,8 @@ import (
 	"syscall"
 	"time"
 
-	swan "swan"
-	"swan/events"
+	swan "github.com/wsm25/swan"
+	"github.com/wsm25/swan/events"
 	"swan4-tests/wiretest"
 )
 

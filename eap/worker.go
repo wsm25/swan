@@ -37,7 +37,7 @@ type Worker struct {
 // NewWorker binds a freshly built (or reset) Method to the mailbox.
 func NewWorker(method Method, rounds <-chan Round) *Worker {
 	if method == nil {
-		panic("swan/eap: NewWorker requires a non-nil method")
+		panic("github.com/wsm25/swan/eap: NewWorker requires a non-nil method")
 	}
 	return &Worker{
 		method: method,
@@ -54,7 +54,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer close(w.done)
 
 	if err := w.method.Initialize(); err != nil {
-		return fmt.Errorf("swan/eap: initialize %s: %w", w.method.Name(), err)
+		return fmt.Errorf("github.com/wsm25/swan/eap: initialize %s: %w", w.method.Name(), err)
 	}
 
 	completed := false
@@ -84,7 +84,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 			if completed {
 				round.Reply <- RoundResult{
-					Err: fmt.Errorf("swan/eap: method %s already completed", w.method.Name()),
+					Err: fmt.Errorf("github.com/wsm25/swan/eap: method %s already completed", w.method.Name()),
 				}
 				continue
 			}

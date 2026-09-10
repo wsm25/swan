@@ -30,7 +30,7 @@ type TrafficSelectors struct {
 // that do not match.
 func AppendTS(dst []byte, ts TrafficSelectors) []byte {
 	if len(ts.Selectors) > 255 {
-		panic(fmt.Sprintf("swan/payload: %d traffic selectors exceed the wire limit 255", len(ts.Selectors)))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: %d traffic selectors exceed the wire limit 255", len(ts.Selectors)))
 	}
 	start := len(dst)
 	dst = append(dst, byte(len(ts.Selectors)), 0, 0, 0)
@@ -82,7 +82,7 @@ func appendTrafficSelector(dst []byte, s Selector) []byte {
 	startWidth := len(ipOctets(s.StartAddr))
 	endWidth := len(ipOctets(s.EndAddr))
 	if startWidth == 0 || endWidth == 0 || startWidth != endWidth {
-		panic(fmt.Sprintf("swan/payload: traffic selector address width mismatch %d/%d", startWidth, endWidth))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: traffic selector address width mismatch %d/%d", startWidth, endWidth))
 	}
 	width := startWidth
 	start := len(dst)

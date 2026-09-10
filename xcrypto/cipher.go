@@ -368,7 +368,9 @@ func ccmProcess(block cipher.Block, x *[16]byte, data []byte) {
 		if n > 16 {
 			n = 16
 		}
-		clear(buf[:])
+		for i := range buf {
+			buf[i] = 0
+		}
 		copy(buf[:n], data[:n])
 		for i := 0; i < 16; i++ {
 			buf[i] ^= x[i]

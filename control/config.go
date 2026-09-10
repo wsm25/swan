@@ -5,9 +5,9 @@ import (
 	"net"
 	"time"
 
-	"swan/eap"
-	"swan/wire/payload"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/eap"
+	"github.com/wsm25/swan/wire/payload"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // Config is the protocol configuration consumed by the control plane. The
@@ -88,6 +88,7 @@ type Timeouts struct {
 	InitialRTO           time.Duration
 	MaxRTO               time.Duration
 	MaxRetries           uint8
+	Keepalive            time.Duration
 	SkfReassemblyTimeout time.Duration
 }
 
@@ -98,6 +99,7 @@ func DefaultTimeouts() Timeouts {
 		InitialRTO:           time.Second,
 		MaxRTO:               8 * time.Second,
 		MaxRetries:           5,
+		Keepalive:            DefaultKeepaliveInterval,
 		SkfReassemblyTimeout: 15 * time.Second,
 	}
 }
@@ -125,6 +127,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Timeouts.MaxRetries == 0 {
 		return fmt.Errorf("control: MaxRetries must be > 0")
+	}
+	if c.Timeouts.Keepalive <= 0 {
+		return fmt.Errorf("control: Keepalive must be > 0")
 	}
 	if c.Timeouts.SkfReassemblyTimeout <= 0 {
 		return fmt.Errorf("control: SkfReassemblyTimeout must be > 0")

@@ -6,9 +6,9 @@ package methods
 import (
 	"errors"
 
-	"swan/eap"
-	"swan/eap/mschapv2"
-	"swan/eap/peap"
+	"github.com/wsm25/swan/eap"
+	"github.com/wsm25/swan/eap/mschapv2"
+	"github.com/wsm25/swan/eap/peap"
 )
 
 // Registered method names (must match eap.Config.Method values).
@@ -22,12 +22,12 @@ const (
 // methods hard-fail (MVP profile: only these two exist).
 func New(cfg *eap.Config) (eap.Method, error) {
 	if cfg == nil {
-		return nil, errors.New("swan/eap/methods: nil EAP configuration")
+		return nil, errors.New("github.com/wsm25/swan/eap/methods: nil EAP configuration")
 	}
 	switch cfg.Method {
 	case MethodPEAP:
 		if cfg.ServerName == "" {
-			return nil, errors.New("swan/eap/methods: PEAP requires cfg.ServerName")
+			return nil, errors.New("github.com/wsm25/swan/eap/methods: PEAP requires cfg.ServerName")
 		}
 		opts := peap.Options{
 			FragmentSize:         cfg.FragmentSize,
@@ -40,7 +40,7 @@ func New(cfg *eap.Config) (eap.Method, error) {
 	case MethodMSCHAPV2:
 		return mschapv2.New(cfg.Identity, cfg.Password), nil
 	default:
-		return nil, errors.New("swan/eap/methods: unsupported EAP method " + cfg.Method)
+		return nil, errors.New("github.com/wsm25/swan/eap/methods: unsupported EAP method " + cfg.Method)
 	}
 }
 

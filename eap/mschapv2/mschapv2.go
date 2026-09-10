@@ -23,7 +23,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"swan/eap"
+	"github.com/wsm25/swan/eap"
 )
 
 // MSCHAPv2 opcodes (payload[0]).

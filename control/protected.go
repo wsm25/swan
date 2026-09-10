@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"swan/transport"
-	"swan/wire"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // Protected-message helpers: SK/SKF encryption and decryption plus inbound

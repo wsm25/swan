@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"swan/eap"
-	"swan/eap/methods"
-	"swan/events"
-	"swan/transport"
-	"swan/wire"
+	"github.com/wsm25/swan/eap"
+	"github.com/wsm25/swan/eap/methods"
+	"github.com/wsm25/swan/events"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
 )
 
 // EapPeer is the mailbox bridge between the linear handshake worker and the
@@ -86,7 +86,7 @@ func (w *eapPeerWorker) run(ctx context.Context) {
 	}()
 
 	if err := w.method.Initialize(); err != nil {
-		w.initDone <- fmt.Errorf("swan/control: initialize eap method %s: %w", w.method.Name(), err)
+		w.initDone <- fmt.Errorf("github.com/wsm25/swan/control: initialize eap method %s: %w", w.method.Name(), err)
 		return
 	}
 	close(w.initDone)
@@ -118,7 +118,7 @@ func (w *eapPeerWorker) run(ctx context.Context) {
 
 			if completed {
 				round.Reply <- eap.RoundResult{
-					Err: fmt.Errorf("swan/control: eap method %s already completed", w.method.Name()),
+					Err: fmt.Errorf("github.com/wsm25/swan/control: eap method %s already completed", w.method.Name()),
 				}
 				continue
 			}

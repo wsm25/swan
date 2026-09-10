@@ -3,7 +3,7 @@ package payload
 import (
 	"fmt"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // Auth is the body of an AUTH payload: method byte, 3 reserved bytes and the

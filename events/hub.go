@@ -1,6 +1,9 @@
 package events
 
-import "sync"
+import (
+	"net"
+	"sync"
+)
 
 // Kind is the event type.
 type Kind uint8
@@ -17,6 +20,11 @@ const (
 	EventStopping
 	EventStopped
 	EventBroken
+	// EventAssignedUpdated fires while Running when the peer pushes a CP
+	// configuration change: CFG_SET (peer push) or a CFG_REPLY lease
+	// renewal that changed addresses, DNS or the lease expiry. The first
+	// assignment after the handshake is EventConfigAssigned.
+	EventAssignedUpdated
 )
 
 // Stage names a control-plane phase reported via EventStageChanged.
@@ -48,21 +56,37 @@ type EapProcess struct {
 	Round  uint16
 }
 
+// Assigned is the CP configuration snapshot carried by
+// EventConfigAssigned and EventAssignedUpdated. Duplicate copies are owned
+// by the event hub: callers may retain the value after the delivery.
+type Assigned struct {
+	InternalIPv4       net.IP
+	InternalIPv6       net.IP
+	InternalIPv6Prefix uint8
+	DNS4               []net.IP
+	DNS6               []net.IP
+	// AddressExpirySeconds is the CP lease lifetime from
+	// INTERNAL_ADDRESS_EXPIRY, zero when the responder did not send one.
+	AddressExpirySeconds uint32
+}
+
 // Event is one control-plane transition. Exactly the fields relevant to
 // Kind are populated:
 //
 //	StageChanged         -> Stage
 //	NegotiatedAlgorithm  -> Alg
 //	EapProcess           -> EAP
-//	ConfigAssigned       -> Assigned (control.AssignedConfig value)
+//	ConfigAssigned       -> Assigned (first post-handshake assignment)
+//	AssignedUpdated      -> Assigned (running-time CP change)
 //	Broken               -> Reason
 type Event struct {
 	Kind  Kind
 	Stage Stage
 	Alg   NegotiatedAlgorithm
 	EAP   EapProcess
-	// Assigned carries the CP configuration on EventConfigAssigned.
-	Assigned any
+	// Assigned carries the CP configuration on EventConfigAssigned and
+	// EventAssignedUpdated and is zero for every other kind.
+	Assigned Assigned
 	Reason   string
 }
 

@@ -9,15 +9,15 @@
 // # Layers
 //
 // The implementation is split into layers. The IO/state layers run a fixed
-// set of workers connected by bounded channels; the syntax (swan/wire) and
-// crypto (swan/xcrypto) packages run no goroutines of their own and execute
+// set of workers connected by bounded channels; the syntax (github.com/wsm25/swan/wire) and
+// crypto (github.com/wsm25/swan/xcrypto) packages run no goroutines of their own and execute
 // inside whatever worker calls them.
 //
-//	swan (public API)
-//	  ├── swan/control  ── swan/eap ── swan/eap/{methods,peap,mschapv2}
-//	  │        └──────── swan/wire, swan/xcrypto, swan/transport, swan/events
-//	  ├── swan/esp ───── swan/xcrypto, swan/transport
-//	  └── swan/debug ─── swan/wire, swan/transport, swan/events
+//	github.com/wsm25/swan (public API)
+//	  ├── .../control ── .../eap ── .../eap/{methods,peap,mschapv2}
+//	  │        └─────── .../wire, .../xcrypto, .../transport, .../events
+//	  ├── .../esp ───── .../xcrypto, .../transport
+//	  └── .../debug ─── .../wire, .../transport, .../events
 //
 // # Worker topology (per session)
 //
@@ -37,6 +37,6 @@
 // # Events
 //
 // This package re-exports Event, EventStream, and Stage so the common
-// cases need only the swan import. Values returned by Tunnel.Assigned and
-// Tunnel.ChildSA are named in swan/control.
+// cases need only the github.com/wsm25/swan import. Values returned by Tunnel.Assigned and
+// Tunnel.ChildSA are named in github.com/wsm25/swan/control.
 package swan

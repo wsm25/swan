@@ -2,11 +2,12 @@ package swan
 
 import (
 	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 
-	"swan/control"
-	"swan/esp"
+	"github.com/wsm25/swan/control"
+	"github.com/wsm25/swan/esp"
 )
 
 // Tunnel is the established data plane, exposed as a raw IP packet
@@ -30,8 +31,10 @@ type Tunnel struct {
 	// Outbound queue consumed by the esp outbound worker.
 	outbound chan<- []byte
 
-	assigned control.AssignedConfig
-	childSA  control.ChildSA
+	// assigned/childSA swap wholesale on control-plane updates (rekey,
+	// CFG_SET/CFG_REPLY); accessors return private copies.
+	assigned atomic.Pointer[control.AssignedConfig]
+	childSA  atomic.Pointer[control.ChildSA]
 
 	closed chan struct{}
 	done   chan struct{}
@@ -193,21 +196,75 @@ func (t *Tunnel) Close() error {
 	return err
 }
 
-// Assigned returns the CP-assigned configuration (internal address, DNS).
-// Valid after a successful handshake; zero value before that.
+// Assigned returns a private snapshot of the CP-assigned configuration
+// (internal address, DNS). Valid after a successful handshake; zero value
+// before that. Control-plane updates replace the snapshot atomically; the
+// caller always owns the returned bytes.
 func (t *Tunnel) Assigned() control.AssignedConfig {
 	if t == nil {
 		return control.AssignedConfig{}
 	}
-	return t.assigned
+	if p := t.assigned.Load(); p != nil {
+		return cloneAssigned(*p)
+	}
+	return control.AssignedConfig{}
 }
 
-// ChildSA returns the negotiated CHILD_SA identities (SPIs and selectors).
+// ChildSA returns a private snapshot of the negotiated CHILD_SA identities
+// (SPIs and selectors). It tracks rekeys the way Assigned tracks CP
+// updates.
 func (t *Tunnel) ChildSA() control.ChildSA {
 	if t == nil {
 		return control.ChildSA{}
 	}
-	return t.childSA
+	if p := t.childSA.Load(); p != nil {
+		return cloneChildSA(*p)
+	}
+	return control.ChildSA{}
+}
+
+// setAssigned / setChildSA install a control-plane snapshot. The value is
+// cloned before publication, so later control-layer mutation can never
+// reach a reader holding an old snapshot.
+func (t *Tunnel) setAssigned(a control.AssignedConfig) {
+	if t == nil {
+		return
+	}
+	v := cloneAssigned(a)
+	t.assigned.Store(&v)
+}
+
+func (t *Tunnel) setChildSA(c control.ChildSA) {
+	if t == nil {
+		return
+	}
+	v := cloneChildSA(c)
+	t.childSA.Store(&v)
+}
+
+func cloneAssigned(a control.AssignedConfig) control.AssignedConfig {
+	a.InternalIPv4 = append(net.IP(nil), a.InternalIPv4...)
+	a.InternalIPv6 = append(net.IP(nil), a.InternalIPv6...)
+	a.DNS4 = cloneIPs(a.DNS4)
+	a.DNS6 = cloneIPs(a.DNS6)
+	return a
+}
+
+func cloneChildSA(c control.ChildSA) control.ChildSA {
+	c.TSi = append([]byte(nil), c.TSi...)
+	c.TSr = append([]byte(nil), c.TSr...)
+	return c
+}
+
+func cloneIPs(in []net.IP) []net.IP {
+	if in == nil {
+		return nil
+	}
+	out := make([]net.IP, len(in))
+	for i := range in {
+		out[i] = append(net.IP(nil), in[i]...)
+	}
+	return out
 }
 
 // Done is closed when the tunnel data plane has terminated.

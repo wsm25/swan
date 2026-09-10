@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"swan/eap"
-	"swan/eap/mschapv2"
+	"github.com/wsm25/swan/eap"
+	"github.com/wsm25/swan/eap/mschapv2"
 )
 
 // Method name reported through eap.Method.Name.

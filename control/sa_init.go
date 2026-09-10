@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"net"
 
-	"swan/transport"
-	"swan/wire"
-	"swan/wire/payload"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/wire/payload"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // SA_INIT stage (RFC 7296 1.2 / 2.x):

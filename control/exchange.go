@@ -6,8 +6,8 @@ import (
 	"math"
 	"time"
 
-	"swan/transport"
-	"swan/wire"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
 )
 
 // Request/response exchange mechanics shared by every stage:

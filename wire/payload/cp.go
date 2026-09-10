@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // ConfigAttribute is one configuration attribute (RFC 7296 2.19/3.15.1):
@@ -115,7 +115,7 @@ func AppendConfigRenewRequest(dst []byte, req ConfigRenewRequest) []byte {
 
 func appendConfigAttribute(dst []byte, attr ConfigAttribute) []byte {
 	if len(attr.Value) > 0xFFFF {
-		panic(fmt.Sprintf("swan/payload: configuration attribute value %d exceeds wire limit 65535", len(attr.Value)))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: configuration attribute value %d exceeds wire limit 65535", len(attr.Value)))
 	}
 	start := len(dst)
 	dst = append(dst, 0, 0, 0, 0)

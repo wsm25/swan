@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"sync"
 
-	"swan/transport"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // ErrSeqWrapped reports that the outbound sequence number reached zero:
 // RFC 4303 forbids cycling the counter, and the sender must stop and rekey
 // instead of reusing sequence numbers. It is sticky for the lifetime of the
 // Outbound.
-var ErrSeqWrapped = errors.New("swan/esp: ESP sequence number wrapped after 2^32-1 packets")
+var ErrSeqWrapped = errors.New("github.com/wsm25/swan/esp: ESP sequence number wrapped after 2^32-1 packets")
 
 // FlowLimit is the outbound byte/packet rekey trigger. Zero disables a
 // limit. Counters are outbound-only per the accepted design.
@@ -105,12 +105,12 @@ func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
 	}
 	if p == nil || p.stateErr != nil {
 		if p == nil {
-			return nil, nil, errors.New("swan/esp: outbound configuration is incomplete")
+			return nil, nil, errors.New("github.com/wsm25/swan/esp: outbound configuration is incomplete")
 		}
 		return nil, nil, p.stateErr
 	}
 	if len(packet) == 0 {
-		return nil, nil, errors.New("swan/esp: outbound packet is empty")
+		return nil, nil, errors.New("github.com/wsm25/swan/esp: outbound packet is empty")
 	}
 
 	nextHeader, err := ipNextHeader(packet[0])
@@ -142,7 +142,7 @@ func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
 	}
 	iv := p.iv[:enc.IVLen]
 	if err := xcrypto.Fill(iv); err != nil {
-		return nil, nil, fmt.Errorf("swan/esp: generate ESP IV: %w", err)
+		return nil, nil, fmt.Errorf("github.com/wsm25/swan/esp: generate ESP IV: %w", err)
 	}
 
 	if p.seq == 0 {
@@ -164,7 +164,7 @@ func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
 	}
 	wireLen := espHeaderLen + enc.IVLen + len(plain) + trailerICV
 	if wireLen > transport.MaxFramePayload {
-		return nil, nil, fmt.Errorf("swan/esp: encapsulated packet %d bytes exceeds transport limit %d", wireLen, transport.MaxFramePayload)
+		return nil, nil, fmt.Errorf("github.com/wsm25/swan/esp: encapsulated packet %d bytes exceeds transport limit %d", wireLen, transport.MaxFramePayload)
 	}
 
 	var (
@@ -189,16 +189,16 @@ func (p *Outbound) process(packet []byte, pooled bool) ([]byte, func(), error) {
 
 	datagram, err = p.enc.SealTo(datagram[:espHeaderLen+enc.IVLen], iv, datagram[:espHeaderLen], plain)
 	if err != nil {
-		return fail(fmt.Errorf("swan/esp: encrypt ESP: %w", err))
+		return fail(fmt.Errorf("github.com/wsm25/swan/esp: encrypt ESP: %w", err))
 	}
 
 	if !enc.AEAD {
 		if p.integ == nil {
-			return fail(errors.New("swan/esp: CBC requires an integrity transform"))
+			return fail(errors.New("github.com/wsm25/swan/esp: CBC requires an integrity transform"))
 		}
 		icv, err := p.integ.Sign(datagram)
 		if err != nil {
-			return fail(fmt.Errorf("swan/esp: sign ESP ICV: %w", err))
+			return fail(fmt.Errorf("github.com/wsm25/swan/esp: sign ESP ICV: %w", err))
 		}
 		datagram = append(datagram, icv...)
 	}
@@ -239,21 +239,21 @@ func (p *Outbound) allocDatagram(n int) ([]byte, func()) {
 // for the lifetime of the CHILD_SA.
 func prepareOutbound(cfg OutboundConfig) (*xcrypto.PreparedEncryption, *xcrypto.PreparedIntegrity, error) {
 	if cfg.Selection == nil || cfg.Selection.Encryption == nil || cfg.Keys == nil {
-		return nil, nil, errors.New("swan/esp: outbound configuration is incomplete")
+		return nil, nil, errors.New("github.com/wsm25/swan/esp: outbound configuration is incomplete")
 	}
 	enc := cfg.Selection.Encryption
 	state, err := enc.Prepare(cfg.Keys.SKei)
 	if err != nil {
-		return nil, nil, fmt.Errorf("swan/esp: prepare ESP encryption: %w", err)
+		return nil, nil, fmt.Errorf("github.com/wsm25/swan/esp: prepare ESP encryption: %w", err)
 	}
 	var integ *xcrypto.PreparedIntegrity
 	if !enc.AEAD {
 		if cfg.Selection.Integrity == nil {
-			return nil, nil, errors.New("swan/esp: CBC requires an integrity transform")
+			return nil, nil, errors.New("github.com/wsm25/swan/esp: CBC requires an integrity transform")
 		}
 		integ, err = cfg.Selection.Integrity.Prepare(cfg.Keys.SKai)
 		if err != nil {
-			return nil, nil, fmt.Errorf("swan/esp: prepare ESP integrity: %w", err)
+			return nil, nil, fmt.Errorf("github.com/wsm25/swan/esp: prepare ESP integrity: %w", err)
 		}
 	}
 	return state, integ, nil
@@ -268,7 +268,7 @@ func ipNextHeader(firstByte byte) (byte, error) {
 	case 6:
 		return nextHeaderIPv6, nil
 	default:
-		return 0, fmt.Errorf("swan/esp: unsupported outbound IP version %d", firstByte>>4)
+		return 0, fmt.Errorf("github.com/wsm25/swan/esp: unsupported outbound IP version %d", firstByte>>4)
 	}
 }
 

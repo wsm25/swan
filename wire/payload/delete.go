@@ -3,7 +3,7 @@ package payload
 import (
 	"fmt"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // Delete is the body of a DELETE payload: protocol id, SPI size implied by
@@ -20,14 +20,14 @@ func AppendDelete(dst []byte, d Delete) []byte {
 	switch d.ProtocolID {
 	case wire.DeleteProtocolIKE:
 		if len(d.SPIs) != 0 {
-			panic("swan/payload: IKE delete must not carry SPIs")
+			panic("github.com/wsm25/swan/payload: IKE delete must not carry SPIs")
 		}
 	case wire.DeleteProtocolESP:
 		if len(d.SPIs) == 0 || len(d.SPIs) > 0xFFFF {
-			panic("swan/payload: ESP delete must carry 1..65535 SPIs")
+			panic("github.com/wsm25/swan/payload: ESP delete must carry 1..65535 SPIs")
 		}
 	default:
-		panic(fmt.Sprintf("swan/payload: unsupported delete protocol %d", d.ProtocolID))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: unsupported delete protocol %d", d.ProtocolID))
 	}
 	spiSize := byte(0)
 	if d.ProtocolID == wire.DeleteProtocolESP {

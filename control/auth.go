@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"net"
 
-	"swan/transport"
-	"swan/wire"
-	"swan/wire/payload"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/wire/payload"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // IKE_AUTH stage: bootstrap request, response processing shared with the

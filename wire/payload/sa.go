@@ -3,7 +3,7 @@ package payload
 import (
 	"fmt"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // SA is the body of an SA payload: one or more proposals. For IKE_SA_INIT

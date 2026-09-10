@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"swan/events"
-	"swan/transport"
-	"swan/wire"
-	"swan/wire/payload"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/events"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/wire/payload"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // Control is the top of the control-plane actor tree. It is stateless apart

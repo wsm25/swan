@@ -5,7 +5,7 @@ import (
 	"net"
 	"strings"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // ID is the body of an IDi/IDr payload: type byte plus the identifier data.

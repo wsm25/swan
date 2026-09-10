@@ -3,7 +3,7 @@ package payload
 import (
 	"fmt"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // KeyExchange is the body of a KE payload: DH group number plus the public

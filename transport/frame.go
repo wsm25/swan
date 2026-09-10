@@ -128,12 +128,12 @@ func ReadFrame(r io.Reader, scratch []byte) (Frame, error) {
 		if err == io.EOF {
 			return Frame{}, io.EOF
 		}
-		return Frame{}, fmt.Errorf("swan/transport: read frame header: %w", err)
+		return Frame{}, fmt.Errorf("github.com/wsm25/swan/transport: read frame header: %w", err)
 	}
 
 	n := int(binary.BigEndian.Uint16(hdr[:]))
 	if n > MaxFramePayload {
-		return Frame{}, fmt.Errorf("swan/transport: frame payload %d exceeds limit %d", n, MaxFramePayload)
+		return Frame{}, fmt.Errorf("github.com/wsm25/swan/transport: frame payload %d exceeds limit %d", n, MaxFramePayload)
 	}
 
 	payload := grow(scratch, n)
@@ -141,7 +141,7 @@ func ReadFrame(r io.Reader, scratch []byte) (Frame, error) {
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
 		}
-		return Frame{}, fmt.Errorf("swan/transport: read frame payload: %w", err)
+		return Frame{}, fmt.Errorf("github.com/wsm25/swan/transport: read frame payload: %w", err)
 	}
 
 	return Frame{Kind: Classify(payload), Payload: payload}, nil
@@ -160,7 +160,7 @@ func grow(scratch []byte, n int) []byte {
 // job.
 func WriteFrame(w io.Writer, f Frame) error {
 	if len(f.Payload) > MaxFramePayload {
-		return fmt.Errorf("swan/transport: frame payload %d exceeds limit %d", len(f.Payload), MaxFramePayload)
+		return fmt.Errorf("github.com/wsm25/swan/transport: frame payload %d exceeds limit %d", len(f.Payload), MaxFramePayload)
 	}
 	buf := make([]byte, FrameHeaderSize+len(f.Payload))
 	binary.BigEndian.PutUint16(buf[:FrameHeaderSize], uint16(len(f.Payload)))
@@ -172,7 +172,7 @@ func writeAll(w io.Writer, b []byte) error {
 	for len(b) > 0 {
 		n, err := w.Write(b)
 		if n < 0 || n > len(b) {
-			return fmt.Errorf("swan/transport: invalid write count %d", n)
+			return fmt.Errorf("github.com/wsm25/swan/transport: invalid write count %d", n)
 		}
 		b = b[n:]
 		if err != nil {

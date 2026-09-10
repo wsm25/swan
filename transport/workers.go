@@ -406,7 +406,7 @@ func (w *TxWorker) writeFrames(frames []*Frame) error {
 		}
 		n := FrameHeaderSize + len(body)
 		if len(buf) < n {
-			return fmt.Errorf("swan/transport: coalesced frame accounting mismatch")
+			return fmt.Errorf("github.com/wsm25/swan/transport: coalesced frame accounting mismatch")
 		}
 		binary.BigEndian.PutUint16(buf[:FrameHeaderSize], uint16(len(body)))
 		copy(buf[FrameHeaderSize:], body)
@@ -424,7 +424,7 @@ func shapedPayload(f *Frame) ([]byte, error) {
 	case KindIKE:
 		total := NonESPMarkerLen + len(f.Payload)
 		if total > MaxFramePayload {
-			return nil, fmt.Errorf("swan/transport: ike frame payload %d exceeds limit %d", total, MaxFramePayload)
+			return nil, fmt.Errorf("github.com/wsm25/swan/transport: ike frame payload %d exceeds limit %d", total, MaxFramePayload)
 		}
 		body := make([]byte, total)
 		copy(body[NonESPMarkerLen:], f.Payload)
@@ -432,7 +432,7 @@ func shapedPayload(f *Frame) ([]byte, error) {
 	default:
 		body := f.Payload
 		if len(body) > MaxFramePayload {
-			return nil, fmt.Errorf("swan/transport: esp frame payload %d exceeds limit %d", len(body), MaxFramePayload)
+			return nil, fmt.Errorf("github.com/wsm25/swan/transport: esp frame payload %d exceeds limit %d", len(body), MaxFramePayload)
 		}
 		return body, nil
 	}

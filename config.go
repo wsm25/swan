@@ -5,9 +5,9 @@ import (
 	"net"
 	"time"
 
-	"swan/eap"
-	"swan/transport"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/eap"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // LogicalNatTPort is the logical NAT-T/IKE port used inside the protocol.
@@ -109,8 +109,9 @@ type QueueSizes struct {
 	Events int
 }
 
-// Timeouts control request retransmission and fragment reassembly.
-// All durations must be > 0; zero values are replaced by DefaultConfig.
+// Timeouts control request retransmission, keepalive cadence and fragment
+// reassembly. All durations must be > 0; zero values are replaced by
+// DefaultConfig.
 type Timeouts struct {
 	// InitialRTO is the first retransmit timeout (swan2: 1s).
 	InitialRTO time.Duration
@@ -118,6 +119,10 @@ type Timeouts struct {
 	MaxRTO time.Duration
 	// MaxRetries is the retransmit budget per request (swan2: 5).
 	MaxRetries uint8
+	// Keepalive drives the empty protected INFORMATIONAL keepalive cadence.
+	// Like every other request, an unanswered keepalive retransmits on the
+	// InitialRTO/MaxRTO ladder and exhausts the session after MaxRetries.
+	Keepalive time.Duration
 	// SkfReassemblyTimeout expires incomplete inbound SKF reassembly
 	// (swan2: 15s).
 	SkfReassemblyTimeout time.Duration
@@ -140,6 +145,7 @@ func DefaultConfig(peerIP net.IP) Config {
 			InitialRTO:           time.Second,
 			MaxRTO:               8 * time.Second,
 			MaxRetries:           5,
+			Keepalive:            20 * time.Second,
 			SkfReassemblyTimeout: 15 * time.Second,
 		},
 		Rekey: RekeyConfig{
@@ -211,6 +217,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Timeouts.MaxRetries == 0 {
 		return fmt.Errorf("swan: MaxRetries must be > 0")
+	}
+	if c.Timeouts.Keepalive <= 0 {
+		return fmt.Errorf("swan: Keepalive must be > 0")
 	}
 	if c.Timeouts.SkfReassemblyTimeout <= 0 {
 		return fmt.Errorf("swan: SkfReassemblyTimeout must be > 0")

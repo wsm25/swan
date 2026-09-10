@@ -1,6 +1,6 @@
 package payload
 
-import "swan/wire"
+import "github.com/wsm25/swan/wire"
 
 // EAP payloads are opaque to the IKE layer: the body is a complete EAP
 // packet, parsed and produced exclusively by swan/eap. This file exists so

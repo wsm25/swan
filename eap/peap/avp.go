@@ -3,7 +3,7 @@ package peap
 import (
 	"fmt"
 
-	"swan/eap"
+	"github.com/wsm25/swan/eap"
 )
 
 // MS-AVP framing for tunneled EAP (strongSwan semantics):
@@ -70,7 +70,7 @@ func DecodeInnerRequest(tlsData []byte, eapID uint8) ([]byte, error) {
 			case equalBytes(payload, msAVPFailure):
 				return []byte{byte(eap.CodeFailure), tlsData[1], 0, 4}, nil
 			default:
-				return nil, fmt.Errorf("swan/eap/peap: unknown ms-avp message")
+				return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: unknown ms-avp message")
 			}
 		}
 		// Any other complete inner packet passes through.
@@ -81,7 +81,7 @@ func DecodeInnerRequest(tlsData []byte, eapID uint8) ([]byte, error) {
 	// with the outer PEAP request identifier.
 	total := 4 + len(tlsData)
 	if total > 65535 {
-		return nil, fmt.Errorf("swan/eap/peap: inner eap packet too large: %d", total)
+		return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: inner eap packet too large: %d", total)
 	}
 	out := make([]byte, 0, total)
 	out = append(out, byte(eap.CodeRequest), eapID, byte(total>>8), byte(total))
@@ -93,7 +93,7 @@ func DecodeInnerRequest(tlsData []byte, eapID uint8) ([]byte, error) {
 // bytes (MS-AVP for success/failure, tail otherwise).
 func EncodeInnerResponse(inner []byte) ([]byte, error) {
 	if !completeEAPPacket(inner) {
-		return nil, fmt.Errorf("swan/eap/peap: inner eap packet too short or length mismatch")
+		return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: inner eap packet too short or length mismatch")
 	}
 	code := eap.Code(inner[0])
 	id := inner[1]
@@ -114,7 +114,7 @@ func EncodeInnerResponse(inner []byte) ([]byte, error) {
 		// the tunneled bytes are [type, data]. swan2 encode_peer_response
 		// applies this to every complete non-success/failure packet.
 		if len(inner) < 5 {
-			return nil, fmt.Errorf("swan/eap/peap: inner eap packet missing type")
+			return nil, fmt.Errorf("github.com/wsm25/swan/eap/peap: inner eap packet missing type")
 		}
 		return append([]byte(nil), inner[4:]...), nil
 	}

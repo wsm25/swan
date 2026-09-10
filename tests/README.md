@@ -19,7 +19,7 @@ tests/
 │   └── freeradius/raddb/    FreeRADIUS eap-peap/mschapv2 configs
 ├── udpsink/          responder-side UDP benchmark counter/pump (Go)
 └── client/           Go debug client and tunnel benchmarks
-    ├── go.mod            module swan4-tests (replace swan => ../..)
+    ├── go.mod            module swan4-tests (replace github.com/wsm25/swan => ../..)
     ├── wiretest/         UDP socket -> swan stream framing adapter
     ├── main.go           handshake runner + ICMP echo responder (debug client)
     └── udpbench/         ESP tunnel UDP throughput benchmark
@@ -251,7 +251,7 @@ tunnel itself is keeping up.
   and responder-cert chain verification reject the self-signed test chain.
 - charon logs to stdout (`charondebug` in `strongswan.conf`); raise it to
   `ike 4, enc 4, net 4` when diffing against swan4's debug logs.
-  `swan/debug` renders the IKE/EAP payload chain in the same protocol shape.
+  `github.com/wsm25/swan/debug` renders the IKE/EAP payload chain in the same protocol shape.
 - FreeRADIUS logs to `/var/log/freeradius.log` inside the container:
   `podman exec swan4-ss tail -f /var/log/freeradius.log`.
 - Verify credentials without IKE:

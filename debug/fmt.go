@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"swan/transport"
-	"swan/wire"
-	"swan/wire/payload"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/wire/payload"
 )
 
 // Message renders one parsed IKE message ("recv"/"send"): header summary,

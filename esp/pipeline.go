@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"swan/transport"
+	"github.com/wsm25/swan/transport"
 )
 
 // txBatch is how many additional raw IP packets the outbound worker drains
@@ -271,15 +271,15 @@ func (p *Pipeline) reportFatal(err error) {
 
 func (p *Pipeline) processInbound(pkt *transport.Packet) (InboundPacket, error) {
 	if len(pkt.Payload) < 4 {
-		return InboundPacket{}, errors.New("swan/esp: ESP packet too short for SPI")
+		return InboundPacket{}, errors.New("github.com/wsm25/swan/esp: ESP packet too short for SPI")
 	}
 	table := p.inbound.Load()
 	if table == nil {
-		return InboundPacket{}, errors.New("swan/esp: inbound codec table missing")
+		return InboundPacket{}, errors.New("github.com/wsm25/swan/esp: inbound codec table missing")
 	}
 	codec := (*table)[binary.BigEndian.Uint32(pkt.Payload[:4])]
 	if codec == nil {
-		return InboundPacket{}, errors.New("swan/esp: ESP SPI does not match a known inbound SPI")
+		return InboundPacket{}, errors.New("github.com/wsm25/swan/esp: ESP SPI does not match a known inbound SPI")
 	}
 	ip, release, err := codec.ProcessPooled(pkt.Payload)
 	if err != nil {

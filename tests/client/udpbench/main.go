@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	swan "swan"
+	swan "github.com/wsm25/swan"
 	"swan4-tests/wiretest"
 )
 

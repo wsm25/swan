@@ -44,12 +44,12 @@ type Packet struct {
 // codes; requests must carry a type byte.
 func Parse(b []byte) (*Packet, error) {
 	if len(b) < 4 {
-		return nil, fmt.Errorf("swan/eap: packet too short: %d bytes", len(b))
+		return nil, fmt.Errorf("github.com/wsm25/swan/eap: packet too short: %d bytes", len(b))
 	}
 
 	declared := int(binary.BigEndian.Uint16(b[2:4]))
 	if declared != len(b) {
-		return nil, fmt.Errorf("swan/eap: declared length %d does not match buffer length %d", declared, len(b))
+		return nil, fmt.Errorf("github.com/wsm25/swan/eap: declared length %d does not match buffer length %d", declared, len(b))
 	}
 
 	packet := &Packet{
@@ -60,7 +60,7 @@ func Parse(b []byte) (*Packet, error) {
 	switch packet.Code {
 	case CodeRequest:
 		if declared < 5 {
-			return nil, fmt.Errorf("swan/eap: %s packet missing type byte", codeName(packet.Code))
+			return nil, fmt.Errorf("github.com/wsm25/swan/eap: %s packet missing type byte", codeName(packet.Code))
 		}
 		packet.Type = Type(b[4])
 		packet.Data = b[5:]
@@ -69,7 +69,7 @@ func Parse(b []byte) (*Packet, error) {
 		// as Data for observability.
 		packet.Data = b[4:]
 	default:
-		return nil, fmt.Errorf("swan/eap: unsupported code %d", packet.Code)
+		return nil, fmt.Errorf("github.com/wsm25/swan/eap: unsupported code %d", packet.Code)
 	}
 
 	return packet, nil
@@ -84,7 +84,7 @@ func BuildRequest(code Code, id uint8, typ Type, data []byte) []byte {
 		packetLen++
 	}
 	if packetLen > 0xFFFF {
-		panic(fmt.Sprintf("swan/eap: packet too large: %d bytes", packetLen))
+		panic(fmt.Sprintf("github.com/wsm25/swan/eap: packet too large: %d bytes", packetLen))
 	}
 
 	out := make([]byte, packetLen)

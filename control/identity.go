@@ -3,8 +3,8 @@ package control
 import (
 	"bytes"
 
-	"swan/wire"
-	"swan/wire/payload"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/wire/payload"
 )
 
 // Identity matching helpers for rightid checking.

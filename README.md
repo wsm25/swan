@@ -14,6 +14,11 @@ that stream and returns an `io.ReadWriteCloser` that carries raw IP packets.
   IKEv2 AUTH payload.
 - Responder auth is a signed public-key AUTH (RSA or ECDSA), normally with
   the responder identity set in `RightID` (for example `@stu.vpn.sjtu.edu.cn`).
+- Windows RRAS IKEv2 servers express the tunnel's inner IPv6 endpoint as a
+  link-local TSi (`fe80::IID`) while CP assigns the global `INTERNAL_IP6_ADDRESS`
+  with the same interface identifier. Such a TSi is accepted (the CP global
+  address is still used as the local traffic source); any other TSi/CP
+  mismatch remains a hard failure.
 - `AAAIdentity` is the PEAP/TLS server name. It may differ from `RightID`.
 - CP-driven address and DNS assignment. `left=%config` /
   `leftsourceip=%config4,%config6` is the intended responder profile.
@@ -39,6 +44,11 @@ NAT-T framing:
 - four zero bytes (non-ESP marker) followed by an IKE message;
 - a raw ESP datagram (UDP-encapsulated, no marker).
 
+`NewFrameConn` adapts a connected `net.PacketConn` (UDP or any other
+datagram transport) into this framed stream: each datagram read becomes one
+frame and each frame written becomes one datagram, so callers never hand
+raw datagrams to the library by mistake.
+
 The reader accumulates until the declared length arrives. A partial frame is
 `io.ErrUnexpectedEOF`; a declared length over 65535 is a decode error. The
 single writer adds the length prefix and the non-ESP marker for IKE.
@@ -48,14 +58,14 @@ single writer adds the length prefix and the non-ESP marker for IKE.
 | package | what it does |
 | --- | --- |
 | `swan` | public API: `Config`, `Session`, `Tunnel`, events |
-| `swan/transport` | stream framing, NAT-T classification, batching workers |
-| `swan/wire` | IKEv2 header and payload encode/decode |
-| `swan/xcrypto` | DH, PRF, hashing, ciphers, x509, key scheduling |
-| `swan/control` | handshake state machine, retransmission, keepalives, close |
-| `swan/eap` + subpackages | EAP codec and worker, PEAP, MSCHAPv2 |
-| `swan/esp` | ESP encrypt/decrypt, padding, replay window |
-| `swan/events` | event hub for control-plane transitions |
-| `swan/debug` | human-readable packet/payload logging |
+| `github.com/wsm25/swan/transport` | stream framing, NAT-T classification, batching workers |
+| `github.com/wsm25/swan/wire` | IKEv2 header and payload encode/decode |
+| `github.com/wsm25/swan/xcrypto` | DH, PRF, hashing, ciphers, x509, key scheduling |
+| `github.com/wsm25/swan/control` | handshake state machine, retransmission, keepalives, close |
+| `github.com/wsm25/swan/eap` + subpackages | EAP codec and worker, PEAP, MSCHAPv2 |
+| `github.com/wsm25/swan/esp` | ESP encrypt/decrypt, padding, replay window |
+| `github.com/wsm25/swan/events` | event hub for control-plane transitions |
+| `github.com/wsm25/swan/debug` | human-readable packet/payload logging |
 
 ## Usage
 
@@ -71,15 +81,18 @@ import (
 	"log"
 	"net"
 
-	swan "swan"
+	swan "github.com/wsm25/swan"
 )
 
 func main() {
-	wire, err := net.Dial("udp", "vpn.example:4500") // any io.ReadWriteCloser
+	conn, err := net.Dial("udp", "vpn.example:4500")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer wire.Close()
+	defer conn.Close()
+	// ANY datagram transport works as long as it is framed: each datagram
+	// becomes one [2-byte big-endian length][payload] frame.
+	wire := swan.NewFrameConn(conn.(net.PacketConn))
 
 	cfg := swan.DefaultConfig(net.ParseIP("1.2.3.4"))
 	ike, esp, err := swan.ParseStrongswanProposals(
@@ -140,7 +153,8 @@ func main() {
   drain and `Tunnel.Write` returns `io.ErrClosedPipe`, while the IKE SA and
   its keepalive cadence keep running.
 - Idle keepalives: the running control plane sends an empty protected
-  INFORMATIONAL every 20 seconds, unless a request is already outstanding.
+  INFORMATIONAL on a `Timeouts.Keepalive` cadence (default 20 seconds),
+  unless a request is already outstanding.
   An unanswered keepalive retransmits on the RTO ladder: it starts at
   `Timeouts.InitialRTO`, doubles on each retry up to `Timeouts.MaxRTO`, and
   after `Timeouts.MaxRetries` retransmits the session fails with `Broken`.
@@ -162,10 +176,12 @@ func main() {
     peer-initiated IKE rekey included)
 - Event ordering on success is
   `Starting -> HandshakeStarted -> HandshakeCompleted -> ConfigAssigned -> Started`,
-  with stage, EAP, and negotiated-algorithm events in between. After a
-  running session starts shutting down the terminal order is
-  `Stopping -> Stopped`; fatal runtime failures emit `Broken` first.
-  Emitting never blocks the protocol workers (see `swan/events`).
+  with stage, EAP, and negotiated-algorithm events in between. Peer-pushed
+  CFG_SET or renewal CFG_REPLY changes while running emit
+  `AssignedUpdated` with the new snapshot. After a running session starts
+  shutting down the terminal order is `Stopping -> Stopped`; fatal runtime
+  failures emit `Broken` first. Emitting never blocks the protocol workers
+  (see `github.com/wsm25/swan/events`).
 
 ## Limitations
 
@@ -196,3 +212,6 @@ func main() {
   `tests/README.md`. The handshake and ping flow work against that
   responder; the code remains under test rather than a hardened production
   stack.
+## License
+
+MIT; see [LICENSE](LICENSE).

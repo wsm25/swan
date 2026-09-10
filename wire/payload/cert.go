@@ -3,7 +3,7 @@ package payload
 import (
 	"fmt"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // Cert is the body of a CERT payload: encoding byte plus DER data. The MVP

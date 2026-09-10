@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"time"
 
-	"swan/transport"
-	"swan/wire"
-	"swan/wire/payload"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/wire/payload"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // Rekey orchestration for the Running actor. The select loop in running.go

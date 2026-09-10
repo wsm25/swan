@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"swan/events"
-	"swan/transport"
-	"swan/wire"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/events"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // Handshake is the linear initiator state machine worker. It owns the SA

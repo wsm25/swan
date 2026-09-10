@@ -47,7 +47,7 @@ func (k ErrorKind) String() string {
 // when structured, it carries the kind plus a human-readable chain.
 type Error struct {
 	Kind    ErrorKind
-	Op      string // operation, e.g. "swan/control: run_sa_init"
+	Op      string // operation, e.g. "github.com/wsm25/swan/control: run_sa_init"
 	Section string // protocol section, e.g. "payload.KE", "eap.peap.tls"
 	Offset  int    // byte offset in the offending datagram, -1 when n/a
 	Err     error

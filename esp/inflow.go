@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"swan/xcrypto"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // Layout constants for UDP-encapsulated ESP (RFC 3948/4303): the 8-byte
@@ -94,20 +94,20 @@ func (p *Inbound) Process(datagram []byte) (packet []byte, err error) {
 func (p *Inbound) ProcessPooled(datagram []byte) (packet []byte, release func(), err error) {
 	if p == nil || p.stateErr != nil {
 		if p == nil {
-			return nil, nil, errors.New("swan/esp: inbound configuration is incomplete")
+			return nil, nil, errors.New("github.com/wsm25/swan/esp: inbound configuration is incomplete")
 		}
 		return nil, nil, p.stateErr
 	}
 	if !p.AcceptSPI(datagram) {
-		return nil, nil, errors.New("swan/esp: ESP SPI does not match the inbound SPI")
+		return nil, nil, errors.New("github.com/wsm25/swan/esp: ESP SPI does not match the inbound SPI")
 	}
 	if len(datagram) < espHeaderLen {
-		return nil, nil, errors.New("swan/esp: ESP packet too short for header")
+		return nil, nil, errors.New("github.com/wsm25/swan/esp: ESP packet too short for header")
 	}
 
 	seq := binary.BigEndian.Uint32(datagram[4:8])
 	if seq == 0 {
-		return nil, nil, errors.New("swan/esp: ESP sequence number 0 is invalid")
+		return nil, nil, errors.New("github.com/wsm25/swan/esp: ESP sequence number 0 is invalid")
 	}
 
 	enc := p.cfg.Selection.Encryption
@@ -115,14 +115,14 @@ func (p *Inbound) ProcessPooled(datagram []byte) (packet []byte, release func(),
 	icvLen := enc.ICVLen
 	if !enc.AEAD {
 		if integ == nil {
-			return nil, nil, errors.New("swan/esp: CBC requires an integrity transform")
+			return nil, nil, errors.New("github.com/wsm25/swan/esp: CBC requires an integrity transform")
 		}
 		icvLen = integ.OutputLen
 	}
 
 	body := datagram[espHeaderLen:]
 	if len(body) < enc.IVLen+icvLen {
-		return nil, nil, errors.New("swan/esp: ESP packet too short for IV and ICV")
+		return nil, nil, errors.New("github.com/wsm25/swan/esp: ESP packet too short for IV and ICV")
 	}
 	iv := body[:enc.IVLen]
 	rest := body[enc.IVLen:]
@@ -151,7 +151,7 @@ func (p *Inbound) ProcessPooled(datagram []byte) (packet []byte, release func(),
 		plain, opErr = p.enc.OpenTo(wb.b[:0], iv, datagram[:espHeaderLen], rest)
 	} else {
 		if p.integ == nil {
-			return fail(errors.New("swan/esp: CBC requires an integrity transform"))
+			return fail(errors.New("github.com/wsm25/swan/esp: CBC requires an integrity transform"))
 		}
 		cipherLen := len(rest) - icvLen
 		ciphertext := rest[:cipherLen]
@@ -161,38 +161,38 @@ func (p *Inbound) ProcessPooled(datagram []byte) (packet []byte, release func(),
 		// responder-side integrity key, then decrypts the ciphertext.
 		authArea := datagram[:len(datagram)-icvLen]
 		if !p.integ.Verify(authArea, receivedICV) {
-			return fail(errors.New("swan/esp: ESP integrity check failed"))
+			return fail(errors.New("github.com/wsm25/swan/esp: ESP integrity check failed"))
 		}
 		plain, opErr = p.enc.OpenTo(wb.b[:0], iv, nil, ciphertext)
 	}
 	if opErr != nil {
-		return fail(fmt.Errorf("swan/esp: decrypt ESP: %w", opErr))
+		return fail(fmt.Errorf("github.com/wsm25/swan/esp: decrypt ESP: %w", opErr))
 	}
 
 	// ESP trailer: padLength, then payload data, then nextHeader. The two
 	// trailer bytes sit at the end of the decrypted plaintext; the inner
 	// packet is everything before the padding.
 	if len(plain) < 2 {
-		return fail(errors.New("swan/esp: ESP plaintext is missing the trailer"))
+		return fail(errors.New("github.com/wsm25/swan/esp: ESP plaintext is missing the trailer"))
 	}
 	padLen := int(plain[len(plain)-2])
 	nextHeader := plain[len(plain)-1]
 	if padLen+2 > len(plain) {
-		return fail(errors.New("swan/esp: ESP padding length does not fit the plaintext"))
+		return fail(errors.New("github.com/wsm25/swan/esp: ESP padding length does not fit the plaintext"))
 	}
 	if nextHeader != nextHeaderIPv4 && nextHeader != nextHeaderIPv6 {
-		return fail(fmt.Errorf("swan/esp: unsupported inner protocol %d", nextHeader))
+		return fail(fmt.Errorf("github.com/wsm25/swan/esp: unsupported inner protocol %d", nextHeader))
 	}
 	inner := plain[:len(plain)-padLen-2]
 	if len(inner) == 0 {
-		return fail(errors.New("swan/esp: empty inner packet"))
+		return fail(errors.New("github.com/wsm25/swan/esp: empty inner packet"))
 	}
 	// The replay window advances only for fully authenticated packets:
 	// moving it before AEAD/ICV verification would let a spoofed datagram
 	// (plaintext-visible SPI and sequence number, garbage body) shift the
 	// window into the future and blackhole the real traffic.
 	if !p.window.Accept(seq) {
-		return fail(errors.New("swan/esp: ESP replay window rejected the packet"))
+		return fail(errors.New("github.com/wsm25/swan/esp: ESP replay window rejected the packet"))
 	}
 	return inner, release, nil
 }
@@ -210,21 +210,21 @@ func (p *Inbound) AcceptSPI(datagram []byte) bool {
 // for the lifetime of the CHILD_SA.
 func prepareInbound(cfg InboundConfig) (*xcrypto.PreparedEncryption, *xcrypto.PreparedIntegrity, error) {
 	if cfg.Selection == nil || cfg.Selection.Encryption == nil || cfg.Keys == nil {
-		return nil, nil, errors.New("swan/esp: inbound configuration is incomplete")
+		return nil, nil, errors.New("github.com/wsm25/swan/esp: inbound configuration is incomplete")
 	}
 	enc := cfg.Selection.Encryption
 	state, err := enc.Prepare(cfg.Keys.SKer)
 	if err != nil {
-		return nil, nil, fmt.Errorf("swan/esp: prepare ESP encryption: %w", err)
+		return nil, nil, fmt.Errorf("github.com/wsm25/swan/esp: prepare ESP encryption: %w", err)
 	}
 	var integ *xcrypto.PreparedIntegrity
 	if !enc.AEAD {
 		if cfg.Selection.Integrity == nil {
-			return nil, nil, errors.New("swan/esp: CBC requires an integrity transform")
+			return nil, nil, errors.New("github.com/wsm25/swan/esp: CBC requires an integrity transform")
 		}
 		integ, err = cfg.Selection.Integrity.Prepare(cfg.Keys.SKar)
 		if err != nil {
-			return nil, nil, fmt.Errorf("swan/esp: prepare ESP integrity: %w", err)
+			return nil, nil, fmt.Errorf("github.com/wsm25/swan/esp: prepare ESP integrity: %w", err)
 		}
 	}
 	return state, integ, nil

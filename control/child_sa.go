@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"net"
 
-	"swan/transport"
-	"swan/wire"
-	"swan/wire/payload"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/wire/payload"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // Final IKE_AUTH / CHILD_SA stage:
@@ -372,6 +372,20 @@ func (h *Handshake) decodeChildSelection(sa payload.SA) (uint32, *xcrypto.Select
 // validateTrafficSelectors enforces the MVP remote-access rules: TSi must
 // narrow to the assigned INTERNAL_IP4/IP6_ADDRESS, both sides IPv4+IPv6
 // ranges with sane ordering and all ports (0..65535).
+// cesAcceptWindowsLinkLocalTS reports whether start-end is the Windows
+// RRAS IPv6 form of the assigned address: a single link-local address whose
+// interface identifier (last 64 bits) matches the CP-assigned global one.
+func cesAcceptWindowsLinkLocalTS(start, end, assigned net.IP) bool {
+	if !start.Equal(end) || !start.IsLinkLocalUnicast() {
+		return false
+	}
+	a16, s16 := assigned.To16(), start.To16()
+	if a16 == nil || s16 == nil {
+		return false
+	}
+	return s16[8:].Equal(a16[8:])
+}
+
 func (h *Handshake) validateTrafficSelectors(tsi, tsr payload.TrafficSelectors, assigned *AssignedConfig) error {
 	if len(tsi.Selectors) == 0 || len(tsr.Selectors) == 0 {
 		return fmt.Errorf("control: final IKE_AUTH TS payload has empty selectors")
@@ -384,17 +398,32 @@ func (h *Handshake) validateTrafficSelectors(tsi, tsr payload.TrafficSelectors, 
 		switch sel.Type {
 		case wire.TSTypeIPv4AddrRange:
 			if assigned.InternalIPv4 == nil {
-				return fmt.Errorf("control: TSi is IPv4 but CP has no INTERNAL_IP4_ADDRESS")
+				return fmt.Errorf("control: TSi is IPv4 (%s-%s) but CP has no INTERNAL_IP4_ADDRESS",
+					sel.StartAddr, sel.EndAddr)
 			}
 			if !sel.StartAddr.Equal(assigned.InternalIPv4) || !sel.EndAddr.Equal(assigned.InternalIPv4) {
-				return fmt.Errorf("control: TSi must narrow to the assigned INTERNAL_IP4_ADDRESS")
+				return fmt.Errorf("control: TSi v4 %s-%s must narrow to the CP-assigned INTERNAL_IP4_ADDRESS %s",
+					sel.StartAddr, sel.EndAddr, assigned.InternalIPv4)
 			}
 		case wire.TSTypeIPv6AddrRange:
 			if assigned.InternalIPv6 == nil {
-				return fmt.Errorf("control: TSi is IPv6 but CP has no INTERNAL_IP6_ADDRESS")
+				return fmt.Errorf("control: TSi is IPv6 (%s-%s) but CP has no INTERNAL_IP6_ADDRESS",
+					sel.StartAddr, sel.EndAddr)
 			}
 			if !sel.StartAddr.Equal(assigned.InternalIPv6) || !sel.EndAddr.Equal(assigned.InternalIPv6) {
-				return fmt.Errorf("control: TSi must narrow to the assigned INTERNAL_IP6_ADDRESS")
+				// Windows RRAS IKEv2 expresses the tunnel inner endpoint as
+				// a link-local address (fe80::IID) while CP assigns the
+				// global address with the same interface identifier; the
+				// server its own clients use the global as traffic source,
+				// so accept the link-local form but keep using the CP
+				// address locally. Anything else stays a hard failure.
+				if !cesAcceptWindowsLinkLocalTS(sel.StartAddr, sel.EndAddr, assigned.InternalIPv6) {
+					return fmt.Errorf("control: TSi v6 %s-%s must narrow to the CP-assigned INTERNAL_IP6_ADDRESS %s",
+						sel.StartAddr, sel.EndAddr, assigned.InternalIPv6)
+				}
+				// Accepted: the established Tunnel reports the raw TSi via
+				// Tunnel.ChildSA (the mihomo adapter logs it), so the caller
+				// can still see the Windows-style link-local selector.
 			}
 		default:
 			return fmt.Errorf("control: unsupported TSi traffic selector type %d", sel.Type)

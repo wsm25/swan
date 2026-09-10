@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"swan/control"
-	"swan/esp"
-	"swan/events"
-	"swan/transport"
-	"swan/wire/payload"
-	"swan/xcrypto"
+	"github.com/wsm25/swan/control"
+	"github.com/wsm25/swan/esp"
+	"github.com/wsm25/swan/events"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire/payload"
+	"github.com/wsm25/swan/xcrypto"
 )
 
 // Session assembles all layers around one injected stream wire and drives
@@ -188,6 +188,7 @@ func (s *Session) controlConfig() *control.Config {
 			InitialRTO:           c.Timeouts.InitialRTO,
 			MaxRTO:               c.Timeouts.MaxRTO,
 			MaxRetries:           c.Timeouts.MaxRetries,
+			Keepalive:            c.Timeouts.Keepalive,
 			SkfReassemblyTimeout: c.Timeouts.SkfReassemblyTimeout,
 		},
 		FragmentPlaintextLimit: 1024,
@@ -304,11 +305,11 @@ func (s *Session) Start(ctx context.Context) (*Tunnel, error) {
 	t := &Tunnel{
 		inbound:  s.pktOut,
 		outbound: s.pktIn,
-		assigned: est.Assigned,
-		childSA:  est.Child,
 		closed:   make(chan struct{}),
 		done:     make(chan struct{}),
 	}
+	t.setAssigned(est.Assigned)
+	t.setChildSA(est.Child)
 	t.closeFn = func() error { return s.Stop(context.Background()) }
 	runningDone := make(chan struct{})
 
@@ -322,7 +323,7 @@ func (s *Session) Start(ctx context.Context) (*Tunnel, error) {
 	s.tunnel = t
 	s.started = true
 	s.emit(events.Event{Kind: events.EventHandshakeCompleted})
-	s.emit(events.Event{Kind: events.EventConfigAssigned, Assigned: est.Assigned})
+	s.emit(events.Event{Kind: events.EventConfigAssigned, Assigned: assignedEvent(est.Assigned)})
 	s.emit(events.Event{Kind: events.EventStarted})
 	est.Arm()
 	s.mu.Unlock()
@@ -396,10 +397,8 @@ func (s *Session) watchControlUpdates(t *Tunnel, pipeline *esp.Pipeline) {
 				}
 			case control.UpdateAssigned:
 				if t != nil {
-					s.mu.Lock()
-					t.assigned = u.Assigned
-					s.mu.Unlock()
-					s.emit(events.Event{Kind: events.EventConfigAssigned, Assigned: u.Assigned})
+					t.setAssigned(u.Assigned)
+					s.emit(events.Event{Kind: events.EventAssignedUpdated, Assigned: assignedEvent(u.Assigned)})
 				}
 			}
 		}
@@ -412,7 +411,7 @@ func (s *Session) currentChild() control.ChildSA {
 	if s.tunnel == nil {
 		return control.ChildSA{}
 	}
-	return s.tunnel.childSA
+	return s.tunnel.ChildSA()
 }
 
 func (s *Session) currentChildInboundSPI() uint32 {
@@ -423,7 +422,7 @@ func (s *Session) setCurrentChild(child control.ChildSA) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.tunnel != nil {
-		s.tunnel.childSA = child
+		s.tunnel.setChildSA(child)
 	}
 }
 

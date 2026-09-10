@@ -3,7 +3,7 @@ package payload
 import (
 	"fmt"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // Notify is the body of a NOTIFY payload: protocol id, SPI (0/4/8 bytes
@@ -23,7 +23,7 @@ type Notify struct {
 // exceed the wire field (255) fail hard (panic).
 func AppendNotify(dst []byte, n Notify) []byte {
 	if len(n.SPI) > 255 {
-		panic(fmt.Sprintf("swan/payload: notify SPI length %d exceeds wire limit 255", len(n.SPI)))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: notify SPI length %d exceeds wire limit 255", len(n.SPI)))
 	}
 	start := len(dst)
 	dst = append(dst, n.ProtocolID, byte(len(n.SPI)), 0, 0)

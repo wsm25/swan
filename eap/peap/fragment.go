@@ -53,13 +53,13 @@ func NewOutboundFragmenter(chunk int, includeLength bool) *OutboundFragmenter {
 // reports whether one fragment covered everything.
 func (f *OutboundFragmenter) Start(payload []byte, baseFlags uint8) (packet []byte, done bool, err error) {
 	if f == nil {
-		return nil, false, fmt.Errorf("swan/eap/peap: nil outbound fragmenter")
+		return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: nil outbound fragmenter")
 	}
 	if f.Pending() {
-		return nil, false, fmt.Errorf("swan/eap/peap: outbound fragmenter already active")
+		return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: outbound fragmenter already active")
 	}
 	if f.chunk <= 0 {
-		return nil, false, fmt.Errorf("swan/eap/peap: fragment chunk size must be > 0")
+		return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: fragment chunk size must be > 0")
 	}
 	if payload == nil {
 		payload = []byte{}
@@ -107,7 +107,7 @@ func (f *OutboundFragmenter) Start(payload []byte, baseFlags uint8) (packet []by
 // final fragment. Next with no pending payload is an error.
 func (f *OutboundFragmenter) Next() (packet []byte, done bool, err error) {
 	if f == nil || !f.Pending() {
-		return nil, false, fmt.Errorf("swan/eap/peap: no outbound peap fragments pending")
+		return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: no outbound peap fragments pending")
 	}
 
 	start := f.offset
@@ -161,15 +161,15 @@ func NewInboundFragmenter() *InboundFragmenter {
 // unfragmented path.
 func (f *InboundFragmenter) Push(flags uint8, lengthIncluded uint32, data []byte) (whole []byte, complete bool, err error) {
 	if f == nil {
-		return nil, false, fmt.Errorf("swan/eap/peap: nil inbound fragmenter")
+		return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: nil inbound fragmenter")
 	}
 	if flags&FlagLengthIncluded != 0 {
 		// Only the first fragment may carry L.
 		if f.expected != -1 {
-			return nil, false, fmt.Errorf("swan/eap/peap: unexpected L flag on continuation fragment")
+			return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: unexpected L flag on continuation fragment")
 		}
 		if lengthIncluded == 0 {
-			return nil, false, fmt.Errorf("swan/eap/peap: L flag set but total length is zero")
+			return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: L flag set but total length is zero")
 		}
 		f.parts = nil
 		f.total = 0
@@ -177,7 +177,7 @@ func (f *InboundFragmenter) Push(flags uint8, lengthIncluded uint32, data []byte
 	} else if f.expected == -1 {
 		// Unfragmented path: a single packet without L is complete as-is.
 		if flags&FlagMoreFragments != 0 {
-			return nil, false, fmt.Errorf("swan/eap/peap: fragmented packet missing L on first fragment")
+			return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: fragmented packet missing L on first fragment")
 		}
 		return append([]byte(nil), data...), true, nil
 	}
@@ -185,14 +185,14 @@ func (f *InboundFragmenter) Push(flags uint8, lengthIncluded uint32, data []byte
 	f.parts = append(f.parts, data)
 	f.total += len(data)
 	if f.total > f.expected {
-		return nil, false, fmt.Errorf("swan/eap/peap: fragment total %d exceeds declared length %d", f.total, f.expected)
+		return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: fragment total %d exceeds declared length %d", f.total, f.expected)
 	}
 
 	if flags&FlagMoreFragments != 0 {
 		return nil, false, nil
 	}
 	if f.total != f.expected {
-		return nil, false, fmt.Errorf("swan/eap/peap: fragment total %d != declared length %d", f.total, f.expected)
+		return nil, false, fmt.Errorf("github.com/wsm25/swan/eap/peap: fragment total %d != declared length %d", f.total, f.expected)
 	}
 
 	joined := make([]byte, 0, f.total)

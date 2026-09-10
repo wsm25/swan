@@ -3,7 +3,7 @@ package payload
 import (
 	"fmt"
 
-	"swan/wire"
+	"github.com/wsm25/swan/wire"
 )
 
 // Transform is one SA transform substructure (RFC 7296 3.3.2): type, 16-bit
@@ -29,7 +29,7 @@ type Proposal struct {
 // that overflow the wire length field fail hard (panic).
 func AppendTransform(dst []byte, t Transform, last bool) []byte {
 	if TransformHeaderLen+len(t.Attrs) > 0xFFFF {
-		panic(fmt.Sprintf("swan/payload: transform length %d exceeds wire limit 65535", TransformHeaderLen+len(t.Attrs)))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: transform length %d exceeds wire limit 65535", TransformHeaderLen+len(t.Attrs)))
 	}
 	start := len(dst)
 	dst = append(dst, 0, 0, 0, 0, byte(t.Type), 0, 0, 0)
@@ -69,10 +69,10 @@ func ParseTransform(b []byte) (Transform, []byte, error) {
 // exceeding the wire length field fail hard (panic).
 func AppendProposal(dst []byte, p Proposal, more bool) []byte {
 	if len(p.SPI) > 255 {
-		panic(fmt.Sprintf("swan/payload: proposal SPI length %d exceeds wire limit 255", len(p.SPI)))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: proposal SPI length %d exceeds wire limit 255", len(p.SPI)))
 	}
 	if len(p.Transforms) > 255 {
-		panic(fmt.Sprintf("swan/payload: %d proposal transforms exceed the wire limit 255", len(p.Transforms)))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: %d proposal transforms exceed the wire limit 255", len(p.Transforms)))
 	}
 	transformLen := 0
 	for i := range p.Transforms {
@@ -80,7 +80,7 @@ func AppendProposal(dst []byte, p Proposal, more bool) []byte {
 	}
 	total := ProposalHeaderLen + len(p.SPI) + transformLen
 	if total > 0xFFFF {
-		panic(fmt.Sprintf("swan/payload: proposal length %d exceeds wire limit 65535", total))
+		panic(fmt.Sprintf("github.com/wsm25/swan/payload: proposal length %d exceeds wire limit 65535", total))
 	}
 
 	start := len(dst)

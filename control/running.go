@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"swan/events"
-	"swan/transport"
-	"swan/wire"
-	"swan/wire/payload"
+	"github.com/wsm25/swan/events"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
+	"github.com/wsm25/swan/wire/payload"
 )
 
 // Running owns the SA after the handshake: DPD keepalives, rekey timers,
@@ -20,9 +20,10 @@ import (
 // handshake stops reading that channel before Running starts, so ownership
 // moves without a channel switch and no already-queued packet can be lost.
 
-// KeepaliveInterval drives the empty INFORMATIONAL keepalive (20s).
+// DefaultKeepaliveInterval is the fallback keepalive cadence used by
+// DefaultTimeouts (20s). The running cadence comes from cfg.Timeouts.
 // Outstanding requests have their own RTO retransmission timer.
-const KeepaliveInterval = 20 * time.Second
+const DefaultKeepaliveInterval = 20 * time.Second
 
 // MaxInboundResponseHistory bounds cached responses replayed for duplicate
 // peer INFORMATIONAL/DELETE/CREATE_CHILD_SA requests.
@@ -85,7 +86,7 @@ func (r *Running) Run(ctx context.Context, in <-chan *transport.Packet, tx chan<
 		stopTimer(r.retryTimer)
 	}()
 
-	tick := time.NewTicker(KeepaliveInterval)
+	tick := time.NewTicker(r.cfg.Timeouts.Keepalive)
 	defer tick.Stop()
 
 	// Retransmission timer of the outstanding current-SA request. It is

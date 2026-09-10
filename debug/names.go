@@ -11,9 +11,9 @@ package debug
 import (
 	"fmt"
 
-	"swan/events"
-	"swan/transport"
-	"swan/wire"
+	"github.com/wsm25/swan/events"
+	"github.com/wsm25/swan/transport"
+	"github.com/wsm25/swan/wire"
 )
 
 // PayloadName maps a payload type to its short protocol name ("SA", "SK"...).

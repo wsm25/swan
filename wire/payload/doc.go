@@ -12,7 +12,7 @@
 //     algorithm IDs are numeric.
 package payload
 
-import "swan/wire"
+import "github.com/wsm25/swan/wire"
 
 // Common fixed sizes checked during parsing.
 const (
